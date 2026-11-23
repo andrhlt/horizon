@@ -1506,6 +1506,25 @@ impl Game<'_> {
                 w.copy_tick_settings_from(self);
             }
             w.refill_entity_ids(&pool);
+            // The chunks kept loaded whatever the distance (`/forceload`, a mod's ticket) in the sections this
+            // region owns are its streamer's to keep.
+            if !self.streaming.forced.is_empty() || !w.streaming.forced.is_empty() {
+                let mine: std::collections::HashSet<(i32, i32)> = self
+                    .streaming
+                    .forced
+                    .iter()
+                    .copied()
+                    .filter(|&c| {
+                        set.shared
+                            .map
+                            .owner_of_chunk(c)
+                            .is_some_and(|o| o.id == slot.uid)
+                    })
+                    .collect();
+                if w.streaming.forced != mine {
+                    w.streaming.forced = mine;
+                }
+            }
             if let (Some(shell), Some(host)) = (w.lan.as_mut(), self.lan.as_mut()) {
                 shell.hub.copy_region_settings(&host.hub);
                 host.hub.give_away(&mut shell.hub);
