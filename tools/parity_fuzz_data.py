@@ -227,7 +227,10 @@ def items(rng, seed):
     after = rng.choice([None, 'reload', 'reload', 'copy', 'hopper', 'drop', 'count', 'edit'])
     if route == 'entity' and after not in (None, 'reload'):
         after = 'reload'
-    count = rng.choice([1, 2]) if after == 'hopper' else rng.choice([1, 1, 2, 16, 64])
+    # Within the prototype's stack limit, but for one stack in ten: a count vanilla refuses is a comparison too, and
+    # a patch can raise the limit.
+    limit = 64 if rng.random() < 0.1 else prototype.get('minecraft:max_stack_size', 64)
+    count = rng.choice([n for n in ([1, 2] if after == 'hopper' else [1, 1, 2, 16, 64]) if n <= limit])
     a, hopper, b, c = [7, 2, 7], [7, 1, 7], [7, 0, 7], [9, 0, 7]
     stack = {'k': 'stack', 'how': route, 'at': a, 'item': name, 'count': count, 'nbt': patched, 'setup': True,
              'subject': f'build/{route}'}

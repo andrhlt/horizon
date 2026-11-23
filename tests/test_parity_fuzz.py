@@ -185,6 +185,32 @@ class StackTests(unittest.TestCase):
         self.assertNotEqual(data.mistype(random.Random(1), '5L'), '5L')
 
 
+class CommandTreeTests(unittest.TestCase):
+    tree = {'type': 'root', 'children': {
+        'kill': {'type': 'literal', 'executable': True, 'children': {
+            'targets': {'type': 'argument', 'parser': 'minecraft:entity', 'executable': True,
+                        'properties': {'type': 'entities', 'amount': 'multiple'}}}},
+        'effect': {'type': 'literal', 'children': {'give': {'type': 'literal', 'children': {
+            'targets': {'type': 'argument', 'parser': 'minecraft:entity',
+                        'properties': {'type': 'players', 'amount': 'multiple'}}}}}}}}
+
+    def test_a_walk_names_its_own_entities_and_never_the_sender_or_a_player(self):
+        from tools import parity_fuzz_commands as commands
+        old = dict(commands.TREE)
+        try:
+            commands.TREE.clear()
+            commands.TREE.update(self.tree)
+            made = [commands.command(random.Random(seed), 7) for seed in range(40)]
+            self.assertTrue(all(m is None or m[0].startswith('kill ') and m[1] == 'kill' for m in made))
+            self.assertTrue(any(made))  # a bare /kill (the sender) and /effect give <players> are never made
+            scenario = commands.commands(random.Random(1), 7)
+            texts = [op['cmd'] for op in fuzz.render(scenario, 0) if op['op'] == 'cmd']
+            self.assertFalse(any('{u' in text for text in texts))
+        finally:
+            commands.TREE.clear()
+            commands.TREE.update(old)
+
+
 class ShulkerHitTests(unittest.TestCase):
     def test_live_bullet_scenario_requires_the_vanilla_target_to_take_damage(self):
         scenario = families.shulker(random.Random(10), 10)

@@ -8,10 +8,11 @@ import json
 import re
 
 try:
-    from . import lab, parity_fuzz_data
+    from . import lab, parity_fuzz_commands, parity_fuzz_data
     from .parity_fuzz import read_data
 except ImportError:
     import lab
+    import parity_fuzz_commands
     import parity_fuzz_data
     from parity_fuzz import read_data
 
@@ -326,7 +327,8 @@ def uuid_arg(n):
 
 
 FAMILIES = {'persist': persist, 'spawn': spawn, 'shulker': shulker, 'retype': retype,
-            'items': parity_fuzz_data.items, 'blockdata': parity_fuzz_data.blockdata}
+            'items': parity_fuzz_data.items, 'blockdata': parity_fuzz_data.blockdata,
+            'commands': parity_fuzz_commands.commands}
 
 
 def prepare(family, runner, work):
@@ -335,4 +337,6 @@ def prepare(family, runner, work):
         discover(runner, work)
     elif family == 'items':
         parity_fuzz_data.load_prototypes()
+    elif family == 'commands':
+        parity_fuzz_commands.load_tree()
 

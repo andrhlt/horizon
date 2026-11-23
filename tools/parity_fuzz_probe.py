@@ -3,7 +3,10 @@
 parity-hosted.yml runs harnesses by name and keeps only the log of one that did not pass. So a probe branch (never
 main) adds `tools/test_fuzz_probe_parity.py`, which hands its slices to `run`: each shard runs one, prints the fuzzer's
 output and its `found.json` and `report.json`, and fails. docs/parity-workflow.md, "Fuzzing scenarios", has the stub.
+
+    python3 tools/parity_fuzz_probe.py merge LOGS...   # the shards' downloaded logs as one table of groups
 """
+import json
 import os
 import subprocess
 import sys
@@ -43,3 +46,44 @@ def run(slices):
     kept.write_text(text, encoding='utf-8')
     print(text)
     sys.exit(1)
+
+
+def section(text, name):
+    """The JSON a shard's log holds under `=== name ===`, or None."""
+    start = text.find(f'=== {name} ===')
+    if start < 0:
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(text[start:].split('\n', 1)[1].lstrip())[0]
+    except (ValueError, IndexError):
+        return None
+
+
+def merge(paths):
+    """The shards' groups as one: per signature its seeds and one seed's first difference. A log without found.json
+    is a shard that compared nothing (it hung or crashed): lost, not clean."""
+    groups, totals, lost = {}, {'scenarios': 0, 'invalid': 0, 'refused': 0}, []
+    for path in paths:
+        text = Path(path).read_text(encoding='utf-8', errors='replace')
+        found = section(text, 'found.json')
+        if found is None:
+            if 'smoke' not in text or 'parity_fuzz exited 0' not in text:
+                lost.append(Path(path).name)
+            continue
+        for key in totals:
+            totals[key] += found[key] if key == 'scenarios' else len(found[key])
+        for group in found['groups']:
+            entry = groups.setdefault(group['signature'], {'seeds': [], 'where': group['where'][0]})
+            entry['seeds'] += group['seeds']
+    return {'totals': totals, 'lost': lost,
+            'groups': dict(sorted(groups.items(), key=lambda item: -len(item[1]['seeds'])))}
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 3 or sys.argv[1] != 'merge':
+        sys.exit(__doc__)
+    merged = merge(sys.argv[2:])
+    print(json.dumps({'totals': merged['totals'], 'lost': merged['lost'], 'distinct': len(merged['groups'])}))
+    for signature, entry in merged['groups'].items():
+        print(f'{len(entry["seeds"]):5d}  {signature}  seeds {sorted(entry["seeds"])[:6]}')
+        print(f'         {json.dumps(entry["where"])[:400]}')
