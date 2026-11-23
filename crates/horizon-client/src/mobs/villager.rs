@@ -529,13 +529,10 @@ pub fn is_farmer(m: &Mob) -> bool {
 /// `SimpleContainer(8)`: stacks the villager carries.
 const INVENTORY_SLOTS: usize = 8;
 
-/// `SimpleContainer.addItem` on a container of `slots` slots held as its
-/// occupied stacks in slot order: fill the stacks of the same item and
-/// components below `max_stack`, then free slots; the part that did not fit
-/// is returned.
 /// A villager's or piglin's eight carried slots read again from its saved
 /// `tag`, each stack taken in against the world's item `prototypes` before it
-/// merges; other mobs are left as they are.
+/// merges; other mobs are left as they are. A villager keeps them in its
+/// [`Ext`], a piglin in the mob's own inventory.
 pub(crate) fn reload_container(
     m: &mut Mob,
     tag: &horizon_core::nbt::Tag,
@@ -545,10 +542,19 @@ pub(crate) fn reload_container(
     if matches!(m.species(), Species::Villager | Species::Piglin)
         && let Some(horizon_core::nbt::Tag::List(items)) = tag.get("Inventory")
     {
-        m.extra.inventory = load_container(m, items, INVENTORY_SLOTS, prototypes);
+        let inventory = load_container(m, items, INVENTORY_SLOTS, prototypes);
+        if m.species() == Species::Villager {
+            ext_mut(m).inventory = inventory;
+        } else {
+            m.extra.inventory = inventory;
+        }
     }
 }
 
+/// `SimpleContainer.addItem` on a container of `slots` slots held as its
+/// occupied stacks in slot order: fill the stacks of the same item and
+/// components below `max_stack`, then free slots; the part that did not fit
+/// is returned.
 pub(crate) fn add_to_container(
     inventory: &mut Vec<ItemStack>,
     mut stack: ItemStack,

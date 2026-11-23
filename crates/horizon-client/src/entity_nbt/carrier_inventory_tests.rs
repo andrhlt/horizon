@@ -170,12 +170,22 @@ fn carried_stacks_merge_after_they_are_taken_in_against_the_worlds_prototypes() 
         ]);
         let mut mob = mob_from_nbt(&raw, &types, 1, None).unwrap();
         mob.clean_saved_stacks(&raw, &prototypes);
-        let inventory = &mob.extra.inventory;
+        let wheat = crate::items::ItemStack::new("minecraft:wheat", 20);
+        let inventory = match species {
+            Species::Villager => {
+                &crate::mobs::villager::ext(&mob)
+                    .expect("villager")
+                    .inventory
+            }
+            _ => &mob.extra.inventory,
+        };
         assert_eq!(inventory.len(), 8, "{id}");
-        assert_eq!(
-            inventory[0],
-            crate::items::ItemStack::new("minecraft:wheat", 20),
-            "{id}: both wheat stacks kept as one"
-        );
+        assert_eq!(inventory[0], wheat, "{id}: both wheat stacks kept as one");
+        let saved = mob_to_nbt(&mob, [137, 0, 0, 1], None, None, |_| None);
+        let Some(Tag::List(saved)) = saved.get("Inventory") else {
+            panic!("{id}: saved inventory");
+        };
+        assert_eq!(saved.len(), 8, "{id} save");
+        assert_eq!(saved[0], crate::save::item_to_nbt(&wheat), "{id} save");
     }
 }

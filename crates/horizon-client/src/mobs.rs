@@ -2661,6 +2661,9 @@ impl Mob {
         clean_stacks(extra.equipment.iter_mut().flatten(), prototypes);
         clean_stacks(extra.items.iter_mut().flatten(), prototypes);
         clean_stacks(&mut extra.inventory, prototypes);
+        if let Some(villager) = extra.villager.as_mut() {
+            clean_stacks(&mut villager.inventory, prototypes);
+        }
         if let Some(allay) = extra.allay.as_mut() {
             clean_stacks(allay.inventory.as_mut(), prototypes);
         }
