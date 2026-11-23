@@ -1194,22 +1194,13 @@ impl Game<'_> {
                     "minecraft:set_components" | "set_components" => {
                         // SetComponentsFunction.run validates before ItemCommands limits the count.
                         let components = modifier.field("components");
-                        let patch = components.snbt.cloned().unwrap_or_else(|| {
-                            horizon_client::scoreboard::json_to_tag(components.json)
-                        });
-                        if let Tag::Compound(patch) = patch {
-                            let patch = patch
-                                .into_iter()
-                                .map(|(key, value)| {
-                                    let key = key.to_string_lossy();
-                                    let (prefix, id) = match key.strip_prefix('!') {
-                                        Some(id) => ("!", id),
-                                        None => ("", key.as_str()),
-                                    };
-                                    let id = horizon_world::datafix::dynamic::namespaced(id);
-                                    (format!("{prefix}{id}").as_str().into(), value)
-                                })
-                                .collect();
+                        let patch = components.snbt.map_or_else(
+                            || std::borrow::Cow::Owned(
+                                horizon_client::scoreboard::json_to_tag(components.json)
+                            ),
+                            std::borrow::Cow::Borrowed,
+                        );
+                        if let Tag::Compound(patch) = patch.as_ref() {
                             horizon_client::item_data::apply_components_and_validate(
                                 &mut stack,
                                 patch,

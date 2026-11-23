@@ -2245,9 +2245,12 @@ fn keep_patch_entry(
 /// resulting components and the original count pass `validateStrict`.
 pub fn apply_components_and_validate(
     stack: &mut ItemStack,
-    patch: horizon_core::nbt::Compound,
+    patch: &horizon_core::nbt::Compound,
     items: &crate::items::Items,
 ) {
+    let Ok(patch) = component_values::decode_modifier_patch(patch) else {
+        return;
+    };
     let prototype = items.component_defaults.get(&*stack.item);
     let mut merged = match components_tag(stack.damage, stack.data()) {
         Some(Tag::Compound(components)) => components,
@@ -2263,17 +2266,6 @@ pub fn apply_components_and_validate(
         };
         merged.remove(&opposite);
         if keep_patch_entry(&key, &value, prototype) {
-            // The stack stores the decoded `Codec.INT` value for its size limit.
-            let value = if id == "minecraft:max_stack_size" {
-                let Some(size) =
-                    crate::properties::component_int(&value).filter(|size| (1..=99).contains(size))
-                else {
-                    return;
-                };
-                Tag::Int(size)
-            } else {
-                value
-            };
             merged.insert(key, value);
         } else {
             merged.remove(&key);
@@ -2497,7 +2489,7 @@ mod tests {
         ] {
             let mut stack = ItemStack::new(item, count);
             (stack.damage, stack.extra) = decode_components(Some(&Tag::Compound(patch(before))));
-            apply_components_and_validate(&mut stack, patch(change), &items);
+            apply_components_and_validate(&mut stack, &patch(change), &items);
             assert_eq!(stack.count, count, "{item}");
             assert_eq!(
                 encode_components(&stack),
@@ -2527,7 +2519,7 @@ mod tests {
             format!(r#""minecraft:bundle_contents":[{nested}]"#),
         ] {
             let snbt = format!(r#"{{"minecraft:rarity":"rare",{invalid}}}"#);
-            apply_components_and_validate(&mut stack, patch(&snbt), &items);
+            apply_components_and_validate(&mut stack, &patch(&snbt), &items);
             assert_eq!(encode_components(&stack), None, "{invalid}");
         }
     }
@@ -2558,15 +2550,31 @@ mod tests {
                 "minecraft:bundle",
                 r#"{"minecraft:bundle_contents":[{id:"ender_pearl",count:17}]}"#,
             ),
+            (
+                "minecraft:bundle",
+                r#"{bundle_contents:[{id:"compass",count:2,components:{max_stack_size:1}}]}"#,
+            ),
+            (
+                "minecraft:bundle",
+                r#"{bundle_contents:[{id:"compass",components:{max_stack_size:100}}]}"#,
+            ),
+            (
+                "minecraft:chest",
+                r#"{container:[{slot:0,item:{id:"compass",count:2,components:{max_stack_size:1}}}]}"#,
+            ),
+            (
+                "minecraft:crossbow",
+                r#"{charged_projectiles:[{id:"arrow",count:2,components:{max_stack_size:1}}]}"#,
+            ),
         ] {
             let mut stack = ItemStack::new(item, 1);
-            apply_components_and_validate(&mut stack, patch(invalid), &items);
-            assert_eq!(encode_components(&stack), None, "{item}");
+            apply_components_and_validate(&mut stack, &patch(invalid), &items);
+            assert_eq!(encode_components(&stack), None, "{invalid}");
         }
         let mut bundle = ItemStack::new("minecraft:bundle", 1);
         apply_components_and_validate(
             &mut bundle,
-            patch(r#"{"minecraft:bundle_contents":[{id:"ender_pearl",count:3},"ender_pearl"]}"#),
+            &patch(r#"{"minecraft:bundle_contents":[{id:"ender_pearl",count:3},"ender_pearl"]}"#),
             &items,
         );
         let pearls = &bundle.data().unwrap().bundle_contents;
@@ -2578,6 +2586,25 @@ mod tests {
         );
         let contents = crate::bundle::Contents::from_items(&items, pearls.clone());
         assert_eq!(contents.weight_fraction(), 0.25);
+
+        apply_components_and_validate(
+            &mut bundle,
+            &patch(
+                r#"{bundle_contents:[{id:"chest",components:{container:[{slot:0,item:{
+                id:"compass",components:{max_stack_size:1b,custom_data:{max_stack_size:100}}
+            }}]}}]}"#,
+            ),
+            &items,
+        );
+        let chest = &bundle.data().unwrap().bundle_contents[0];
+        let compass = &chest.data().unwrap().container[0].1;
+        assert_eq!(compass.own_max_stack_size(), Some(1));
+        assert_eq!(
+            encode_components(compass).unwrap(),
+            Tag::Compound(patch(
+                r#"{"minecraft:max_stack_size":1,"minecraft:custom_data":{max_stack_size:100}}"#
+            )),
+        );
     }
 
     /// `PatchedDataComponentMap.applyPatch`: values equal to the loaded prototype (whose

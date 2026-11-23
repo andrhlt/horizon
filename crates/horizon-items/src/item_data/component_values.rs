@@ -1,7 +1,106 @@
 //! Shared persistent component parsing and borrowed decoded-value comparisons.
 use crate::properties::resolvable;
 use horizon_client_core::registries::Registries;
-use horizon_core::nbt::Tag;
+use horizon_core::nbt::{Compound, JavaString, Tag};
+
+/// `DataComponents.MAX_STACK_SIZE`: decode the NbtOps number through `Codec.INT`.
+pub fn max_stack_size(value: &Tag) -> Result<i32, String> {
+    let size = crate::properties::component_int(value).ok_or("Not a number")?;
+    if !(1..=99).contains(&size) {
+        return Err(format!("Value must be within range [1;99]: {size}"));
+    }
+    Ok(size)
+}
+
+/// The component keys and stack-size values in a modifier's `DataComponentPatch`,
+/// including patches inside stack templates. Walk only component payloads that
+/// hold items so opaque data such as `custom_data` keeps its original keys.
+pub fn decode_modifier_patch(patch: &Compound) -> Result<Compound, String> {
+    use horizon_world::datafix::dynamic::namespaced;
+
+    patch
+        .iter()
+        .map(|(key, value)| {
+            let text = key.to_string_lossy();
+            if let Some(id) = text.strip_prefix('!') {
+                return Ok((
+                    format!("!{}", namespaced(id)).as_str().into(),
+                    value.clone(),
+                ));
+            }
+            let id = namespaced(&text);
+            let decoded = match id.as_str() {
+                "minecraft:max_stack_size" => max_stack_size(value).map(Tag::Int),
+                "minecraft:container" => map_items(value, |slot| {
+                    map_fields(slot, |key, field| {
+                        if key == &JavaString::from("item") {
+                            decode_item_template(field)
+                        } else {
+                            Ok(field.clone())
+                        }
+                    })
+                }),
+                "minecraft:bundle_contents" | "minecraft:charged_projectiles" => {
+                    map_items(value, decode_item_template)
+                }
+                "minecraft:use_remainder" => decode_item_template(value),
+                "minecraft:pot_decorations" => {
+                    map_fields(value, |key, field| match key.to_string_lossy().as_str() {
+                        "back" | "left" | "right" | "front" => decode_item_template(field),
+                        _ => Ok(field.clone()),
+                    })
+                }
+                _ => Ok(value.clone()),
+            };
+            decoded
+                .map(|value| (id.as_str().into(), value))
+                .map_err(|error| {
+                    let missed = Tag::compound([(key.clone(), value.clone())]);
+                    format!(
+                        "{error} missed input: {}",
+                        horizon_client_core::snbt::to_snbt(&missed)
+                    )
+                })
+        })
+        .collect()
+}
+
+fn decode_item_template(value: &Tag) -> Result<Tag, String> {
+    map_fields(value, |key, value| {
+        if key == &JavaString::from("components")
+            && let Tag::Compound(patch) = value
+        {
+            decode_modifier_patch(patch).map(Tag::Compound)
+        } else {
+            Ok(value.clone())
+        }
+    })
+}
+
+fn map_items(value: &Tag, decode: impl FnMut(&Tag) -> Result<Tag, String>) -> Result<Tag, String> {
+    let Tag::List(items) = value else {
+        return Ok(value.clone());
+    };
+    items
+        .iter()
+        .map(decode)
+        .collect::<Result<_, _>>()
+        .map(Tag::List)
+}
+
+fn map_fields(
+    value: &Tag,
+    decode: impl Fn(&JavaString, &Tag) -> Result<Tag, String>,
+) -> Result<Tag, String> {
+    let Tag::Compound(fields) = value else {
+        return Ok(value.clone());
+    };
+    fields
+        .iter()
+        .map(|(key, field)| decode(key, field).map(|field| (key.clone(), field)))
+        .collect::<Result<_, _>>()
+        .map(Tag::Compound)
+}
 
 /// Decode `Identifier.CODEC` without requiring a registered resource.
 pub fn identifier(value: &Tag) -> Result<Tag, String> {
