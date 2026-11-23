@@ -2025,6 +2025,18 @@ fn write_region_records(
     folder: &str,
     records: &[((i32, i32), &Record)],
 ) -> Result<()> {
+    write_region_records_with_sync(root, cache, folder, records, |path| {
+        fs::OpenOptions::new().write(true).open(path)?.sync_data()
+    })
+}
+
+fn write_region_records_with_sync(
+    root: &Path,
+    cache: &RegionCache,
+    folder: &str,
+    records: &[((i32, i32), &Record)],
+    mut sync_file: impl FnMut(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as u32);
@@ -2044,20 +2056,23 @@ fn write_region_records(
         let Some(region) = cached_region(cache, (rx, rz), &path, create)? else {
             continue;
         };
-        let mut region = region.lock().map_err(|_| "region file poisoned")?;
-        let _writing = far_regions::writing(cache, (rx, rz));
-        let mut changed = false;
-        for (pos, record) in &list {
-            match record {
-                Some(record) => {
-                    region.write(*pos, record)?;
-                    changed = true;
+        let changed = {
+            let mut region = region.lock().map_err(|_| "region file poisoned")?;
+            let _writing = far_regions::writing(cache, (rx, rz));
+            let mut changed = false;
+            for (pos, record) in &list {
+                match record {
+                    Some(record) => {
+                        region.write(*pos, record)?;
+                        changed = true;
+                    }
+                    None => changed |= region.clear(*pos, timestamp)?,
                 }
-                None => changed |= region.clear(*pos, timestamp)?,
             }
-        }
+            changed
+        };
         if changed {
-            region.sync()?;
+            sync_file(&path)?;
         }
     }
     Ok(())

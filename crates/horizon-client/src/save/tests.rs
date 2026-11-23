@@ -4915,3 +4915,45 @@ fn far_terrain_reads_a_real_bobby_cache() {
         let _ = fs::remove_dir_all(&own);
     }
 }
+
+#[test]
+fn region_sync_releases_region_mutex_for_readers() {
+    let dir = std::env::temp_dir().join(format!("horizon-save-sync-lock-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let save = SaveDir::new(dir.clone(), LevelShape::OVERWORLD);
+    let record = Record::Tag(Arc::new(NamedTag {
+        name: "".into(),
+        tag: Tag::compound([
+            ("DataVersion", Tag::Int(DATA_VERSION)),
+            ("version", Tag::Int(42)),
+        ]),
+    }));
+
+    let mut synced = false;
+    super::write_region_records_with_sync(
+        &save.root,
+        &save.regions,
+        "region",
+        &[((0, 0), &record)],
+        |path| {
+            synced = true;
+            let cached = super::cached_region(&save.regions, (0, 0), path, false)
+                .unwrap()
+                .expect("region should remain cached during sync");
+            assert!(
+                cached.try_lock().is_ok(),
+                "region mutex must be released before syncing to disk"
+            );
+            let read = super::read_region_record(&save.root, &save.regions, "region", 0, 0)
+                .unwrap()
+                .expect("written chunk should be readable during sync");
+            assert_eq!(number(read.tag.get("version")), Some(42));
+            fs::OpenOptions::new().write(true).open(path)?.sync_data()
+        },
+    )
+    .unwrap();
+
+    assert!(synced, "sync callback must run after writing a chunk");
+    drop(save);
+    let _ = fs::remove_dir_all(&dir);
+}
