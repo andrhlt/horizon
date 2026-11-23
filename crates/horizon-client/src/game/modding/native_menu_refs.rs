@@ -79,7 +79,7 @@ impl Game<'_> {
     /// such as a key or the wheel; no sound, that is the screen's. Refuses
     /// stale menus, non-client hosts and the inventory menu, which no server
     /// opened. True means sent, not that the menu took it.
-    pub(super) fn menu_click_button(&mut self, menu: MenuRef, button: i32) -> bool {
+    pub(super) fn menu_click_button(&self, menu: MenuRef, button: i32) -> bool {
         !self.is_logical_server()
             && self.native_client_menu_name(menu).is_some()
             && self.remote_button_click(button)

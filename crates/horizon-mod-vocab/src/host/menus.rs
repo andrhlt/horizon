@@ -139,6 +139,14 @@ pub trait MenusClientBackend {
     /// Built per call with one Vec allocation and a table lookup; cache for the menu.
     #[access(WorldOnly)]
     fn menu_slot_kinds(&self, menu: MenuRef) -> Option<Vec<MenuSlotKind>>;
+    /// Side: client.
+    /// Press button `button` of the local player's open menu as a click on one of its buttons does
+    /// (`MultiPlayerGameMode.handleInventoryButtonClick`, `ContainerButtonClick`). This remains
+    /// callable from immutable client hooks; the engine submits the packet through its client
+    /// input path. Refuses stale menus, non-client hosts and the inventory menu. True means sent,
+    /// not that the server took it.
+    #[access(WorldOnly)]
+    fn menu_click_button(&self, menu: MenuRef, button: i32) -> bool;
 }
 /// The handles' client writes of the `menus` area, implemented by the game and reached through [`ClientBackendMut`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait
@@ -163,17 +171,6 @@ pub trait MenusClientBackendMut {
     /// the inventory menu while playing. A server closes a menu with `close_container`.
     #[access(WorldOnly)]
     fn menu_close(&mut self, menu: MenuRef) -> bool;
-    /// Side: client.
-    /// Press button `button` of the local player's open menu as a click on
-    /// one of its buttons does (`MultiPlayerGameMode.handleInventoryButtonClick`,
-    /// `ContainerButtonClick`): the server's menu decides what it does
-    /// (`clickMenuButton`, and `menu_button` for a mod's menu). For a client
-    /// mod's own input on a menu's screen where `screen_click` doesn't come,
-    /// such as a key or the wheel; no sound, that is the screen's. Refuses
-    /// stale menus, non-client hosts and the inventory menu, which no server
-    /// opened. True means sent, not that the menu took it.
-    #[access(WorldOnly)]
-    fn menu_click_button(&mut self, menu: MenuRef, button: i32) -> bool;
 }
 /// The handles' server writes of the `menus` area, implemented by the game and reached through [`Backend`].
 // hidden: a handle's backend, reached through `Backend`; mods call the handle, never this trait

@@ -12284,6 +12284,7 @@ pub(crate) mod tests {
         };
         use horizon_core::nbt::Tag;
         use horizon_protocol::packets::play::{self, Clientbound as C};
+        use mod_api::ClientHost;
 
         with_game(|game| {
             let (mut reader, _writer) = connect_menu_test(game);
@@ -12336,7 +12337,8 @@ pub(crate) mod tests {
             assert!(!menu.close(game));
             game.options.execution_role = ExecutionRole::Client;
             assert_eq!(game.screen, Screen::Inventory);
-            assert!(menu.click_button(game, 3));
+            let host: &dyn ClientHost = game;
+            assert!(menu.click_button(host, 3));
             let Some(play::Serverbound::ContainerButtonClick(click)) = sent(&mut reader) else {
                 panic!("expected the button click, not a refused request");
             };
