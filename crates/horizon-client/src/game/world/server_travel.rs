@@ -345,6 +345,13 @@ impl Game<'_> {
             });
         }
     }
+    /// Whether a trip is waiting that is more than a respawn at this level's own world spawn: a portal, a
+    /// command's arrival, a respawn in another level. A resident region comes home for these.
+    pub(super) fn has_trip_between_levels(&self) -> bool {
+        self.server_trips
+            .iter()
+            .any(|t| !(t.world_spawn && t.dim == self.dim))
+    }
     /// Whether `conn` is between two levels: the server leaves its body
     /// alone until it arrives.
     pub(super) fn on_server_trip(&self, conn: u32) -> bool {

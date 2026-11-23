@@ -722,10 +722,7 @@ enum Land {
 fn wants_land(w: &Game<'_>) -> bool {
     // A respawn at the world spawn of the region's own level waits for chunks in the region, as any region's
     // player does: only a trip between levels is the server thread's.
-    let trips_between_levels = w
-        .server_trips
-        .iter()
-        .any(|t| !(t.world_spawn && t.dim == w.dim));
+    let trips_between_levels = w.has_trip_between_levels();
     if !w.level_teleports.is_empty() || trips_between_levels || w.region_raids_want_home() {
         return true;
     }
