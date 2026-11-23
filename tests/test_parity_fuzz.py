@@ -1,5 +1,6 @@
 import json
 import random
+import shutil
 import unittest
 from pathlib import Path
 
@@ -267,6 +268,43 @@ class StackTests(unittest.TestCase):
             merged = probe.merge(paths)
         self.assertEqual(merged['totals'], {'scenarios': 75, 'invalid': 0, 'refused': 3})
         self.assertEqual(list(merged['clusters']), ['commands|cmd/x|y|only vanilla'])
+
+    def test_slices_run_side_by_side_each_with_its_own_home_and_a_lost_one_fails_the_run(self):
+        import argparse
+        import tempfile
+        from tools import parity_fuzz_probe as probe
+        # A stand-in fuzzer: writes found.json into its work folder, but for seed 30; says which game home it got.
+        stub = ('import json, os, sys\n'
+                'args = sys.argv[1:]\n'
+                'seed, work = args[args.index("--seed") + 1], args[args.index("--work-dir") + 1]\n'
+                'print("home", os.path.basename(os.path.dirname(os.environ["HORIZON_HOME"])), "args", " ".join(args[:7]))\n'
+                'if seed != "30":\n'
+                '    json.dump({"scenarios": int(args[args.index("--count") + 1]), "invalid": [], "refused": [],\n'
+                '               "groups": []}, open(os.path.join(work, "found.json"), "w"))\n')
+        real = probe.FUZZER
+        with tempfile.TemporaryDirectory() as folder:
+            probe.FUZZER = Path(folder) / 'stub.py'
+            probe.FUZZER.write_text(stub, encoding='utf-8')
+            base = dict(family='commands', seed=10, count=10, slices=3, seeds=None, shrink_rounds=0, ordinary=True,
+                        binary=Path(folder) / 'game', limit=60)
+            try:
+                with self.assertRaises(SystemExit) as lost:
+                    probe.slices(argparse.Namespace(**base, out=Path(folder) / 'a'))
+                self.assertIn('[30]', str(lost.exception.code))
+                with self.assertRaises(SystemExit) as fine:
+                    probe.slices(argparse.Namespace(**{**base, 'seeds': [7, 9]}, out=Path(folder) / 'b'))
+                self.assertEqual(fine.exception.code, 0)
+            finally:
+                probe.FUZZER = real
+                for name in ('slice-10', 'slice-20', 'slice-30', 'slice-7', 'slice-9'):
+                    shutil.rmtree(probe.ROOT / '.local' / 'parity-fuzz' / name, ignore_errors=True)
+            out = Path(folder)
+            self.assertEqual(sorted(path.name for path in (out / 'a').iterdir()), ['slice-10', 'slice-20', 'slice-30'])
+            self.assertTrue((out / 'a/slice-20/found.json').exists() and not (out / 'a/slice-30/found.json').exists())
+            self.assertIn('home slice-20 args commands --seed 20 --count 10 --batch 25',
+                          (out / 'a/slice-20/output.txt').read_text(encoding='utf-8'))
+            self.assertIn('--seed 9 --count 1 ', (out / 'b/slice-9/output.txt').read_text(encoding='utf-8'))
+            self.assertEqual(probe.merge(sorted(out.glob('*/*/found.json')))['totals']['scenarios'], 22)
 
     def test_a_merge_takes_the_retry_when_the_first_run_stopped_without_a_result(self):
         import tempfile

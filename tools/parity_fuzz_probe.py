@@ -24,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # tools/parity.py stops a harness after `--timeout` (2400 s hosted), the game's build included; what the fuzzer
 # found by then is in found.json, written before it shrinks.
 LIMIT = 1800
+FUZZER = ROOT / 'tools/parity_fuzz.py'
 
 
 def run(slices):
@@ -57,17 +58,18 @@ def run(slices):
 
 
 def slices(args):
-    """`args.slices` slices of one family side by side, each with a work folder and a game home of its own; what each
-    printed and found goes to `args.out`/slice-<first seed>/. Exits 1 when a slice compared nothing."""
+    """`args.slices` slices of one family side by side (`args.count` seeds each from `args.seed` on, or one slice for
+    each of `args.seeds`), each with a work folder and a game home of its own; what each printed and found goes to
+    `args.out`/slice-<first seed>/. Exits 1 when a slice compared nothing."""
     running = []
-    for index in range(args.slices):
-        first = args.seed + index * args.count
+    count = 1 if args.seeds else args.count
+    for first in args.seeds or [args.seed + index * count for index in range(args.slices)]:
         work, kept = ROOT / '.local' / 'parity-fuzz' / f'slice-{first}', args.out / f'slice-{first}'
         shutil.rmtree(work, ignore_errors=True)
         (work / 'home').mkdir(parents=True)
         kept.mkdir(parents=True, exist_ok=True)
-        command = [sys.executable, str(ROOT / 'tools/parity_fuzz.py'), args.family, '--seed', str(first),
-                   '--count', str(args.count), '--batch', '25', '--shrink-rounds', str(args.shrink_rounds),
+        command = [sys.executable, str(FUZZER), args.family, '--seed', str(first),
+                   '--count', str(count), '--batch', '25', '--shrink-rounds', str(args.shrink_rounds),
                    '--binary', str(args.binary), '--work-dir', str(work)] + (['--ordinary'] if args.ordinary else [])
         log = (kept / 'output.txt').open('w', encoding='utf-8')
         # A session of its own: a slice stopped at the limit takes its harness, game and oracle with it.
@@ -171,8 +173,10 @@ def main():
     run_slices = commands.add_parser('slices')
     run_slices.add_argument('--family', required=True,
                             choices=['blockdata', 'commands', 'items', 'persist', 'retype', 'shulker', 'spawn'])
-    run_slices.add_argument('--seed', type=int, required=True, help='the first seed of the first slice')
-    run_slices.add_argument('--count', type=int, required=True, help='seeds per slice')
+    run_slices.add_argument('--seed', type=int, default=1, help='the first seed of the first slice')
+    run_slices.add_argument('--count', type=int, default=50, help='seeds per slice')
+    run_slices.add_argument('--seeds', type=lambda text: [int(seed) for seed in text.split(',')],
+                            help='or these seeds, comma-separated: one slice each (a replay, with shrinking)')
     run_slices.add_argument('--slices', type=int, default=8)
     run_slices.add_argument('--shrink-rounds', type=int, default=0)
     run_slices.add_argument('--ordinary', action='store_true')

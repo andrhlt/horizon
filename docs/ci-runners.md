@@ -276,19 +276,21 @@ gh workflow run parity-hosted.yml --ref <branch> -f full=true                   
 
 `.github/workflows/parity-fuzz.yml` runs the scenario fuzzer (docs/parity-workflow.md, "Fuzzing scenarios") on the same
 runners, started by hand only (`gh workflow run parity-fuzz.yml --ref <branch> -f family=commands -f seed=1 -f count=200
--f runners=2`). It takes the data by the rules above and adds none:
+-f runners=2` for a wide search, or `-f seeds=1017,1325 -f shrink_rounds=4` for those seeds again, one slice each,
+shrunk). It takes the data by the rules above and adds none:
 
 - **Same access.** Only a commit on a branch of this repository; the fetch and unseal scripts come from the default
   branch's commit; the two steps that hold a secret are hosted parity's, line for line, and end before the first
-  checkout (`tests/test_ci_parity_fuzz.py` compares the files, so a change to one that is not made in the other fails).
+  checkout. They are copies, not one shared step: an action or a reusable workflow would be one more file whose
+  ref a run has to trust. `tests/test_ci_parity_fuzz.py` compares the two files instead, so a change to one that
+  is not made in the other fails.
 - **Less beside the data.** The game is built once, in a job with no secret, no data and no cache, and the fuzz jobs
   run that build. The tested commit's build scripts never run on a runner that holds the data, unless the sealed
   prepared resources are missing and the preparer has to be built there, as hosted parity does.
 - **Nothing kept.** No job writes a cache entry. Each fuzz job uploads its slices' output, `found.json` and
-  `report.json` (compared values and commands, as hosted parity's logs) for 3 days; the summary job's merged table is
-  kept 30 days.
-- **Cost.** One 16-vCPU runner per 8 slices plus one for the build; a wide `commands` slice of 200 seeds takes about
-  15 minutes.
+  `report.json` (compared values and commands, as hosted parity's logs) and the summary job its merged table, all
+  kept 3 days.
+- **Cost.** One 16-vCPU runner per 8 slices, plus one for the build.
 
 ## Which jobs, and when
 

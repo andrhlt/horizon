@@ -1,6 +1,7 @@
 name: parity-fuzz
 # The scenario fuzzer (tools/parity_fuzz.py, docs/parity-workflow.md#fuzzing-scenarios) on Blacksmith's runners, started
 # by hand only: gh workflow run parity-fuzz.yml --ref <branch> -f family=commands -f seed=1 -f count=200 -f runners=2
+# (a wide search), or -f seeds=1017,1325 -f shrink_rounds=4 (those seeds again, one slice each, shrunk).
 # The vanilla data is handled as in the hosted parity workflow and by its rules (docs/ci-runners.md#hosted-parity): only a
 # commit on a branch of this repository, the fetch and unseal scripts from the default branch's commit, and the steps
 # that hold a secret copied from that file line for line (tests/test_ci_parity_fuzz.py compares them). It differs in
@@ -26,6 +27,10 @@ on:
         description: 16-vCPU runners, 1 to 8
         type: string
         default: '2'
+      seeds:
+        description: Or these seeds, comma-separated (at most 64), one slice each; seed, count and runners then do not count
+        type: string
+        default: ''
       ordinary:
         description: Only what a command or a played world gives (--ordinary)
         type: boolean
@@ -131,6 +136,7 @@ jobs:
           SEED: ${{ inputs.seed }}
           COUNT: ${{ inputs.count }}
           RUNNERS: ${{ inputs.runners }}
+          SEEDS: ${{ inputs.seeds }}
           SHRINK: ${{ inputs.shrink_rounds }}
         run: |
           set -euo pipefail
@@ -141,13 +147,26 @@ jobs:
           [[ "$SEED" =~ ^[0-9]{1,8}$ && "$COUNT" =~ ^[1-9][0-9]{0,2}$ && "$RUNNERS" =~ ^[1-8]$ && "$SHRINK" =~ ^[0-6]$ ]] ||
             { echo "::error::seed, count (1 to 400), runners (1 to 8) or shrink_rounds (0 to 6) is not a number in its range"; exit 1; }
           [ "$COUNT" -le 400 ] || { echo "::error::at most 400 seeds a slice"; exit 1; }
+          [[ -z "$SEEDS" || "$SEEDS" =~ ^[0-9]{1,8}(,[0-9]{1,8}){0,63}$ ]] ||
+            { echo "::error::seeds is not a list of at most 64 numbers"; exit 1; }
           include=""
-          for runner in $(seq "$RUNNERS"); do
-            include+="${include:+,}{\"runner\":$runner,\"of\":$RUNNERS,\"first\":$(( 10#$SEED + (runner - 1) * 8 * COUNT ))}"
-          done
+          if [ -n "$SEEDS" ]; then
+            IFS=, read -ra list <<< "$SEEDS"
+            of=$(( (${#list[@]} + 7) / 8 ))
+            for (( at = 0; at < ${#list[@]}; at += 8 )); do
+              chunk=$(IFS=,; echo "${list[*]:at:8}")
+              include+="${include:+,}{\"runner\":$(( at / 8 + 1 )),\"of\":$of,\"first\":0,\"seeds\":\"$chunk\"}"
+            done
+            echo "$FAMILY: ${#list[@]} seeds again, one slice each, on $of runners" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            for runner in $(seq "$RUNNERS"); do
+              first=$(( 10#$SEED + (runner - 1) * 8 * COUNT ))
+              include+="${include:+,}{\"runner\":$runner,\"of\":$RUNNERS,\"first\":$first,\"seeds\":\"\"}"
+            done
+            echo "$FAMILY: seeds $(( 10#$SEED )) to $(( 10#$SEED + RUNNERS * 8 * COUNT - 1 )), $COUNT a slice, on $RUNNERS runners" |
+              tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           echo "matrix={\"include\":[$include]}" >> "$GITHUB_OUTPUT"
-          echo "$FAMILY: seeds $(( 10#$SEED )) to $(( 10#$SEED + RUNNERS * 8 * COUNT - 1 )), $COUNT a slice, on $RUNNERS runners" |
-            tee -a "$GITHUB_STEP_SUMMARY"
 
   # The game, built once from the tested commit: no secret, no data, no cache. Its build scripts run here, where
   # there is nothing of the maintainers' to read; the fuzz jobs only run what this job uploads, after their last step
@@ -453,6 +472,7 @@ jobs:
         env:
           FAMILY: ${{ inputs.family }}
           FIRST: ${{ matrix.first }}
+          SEEDS: ${{ matrix.seeds }}
           COUNT: ${{ inputs.count }}
           SHRINK: ${{ inputs.shrink_rounds }}
           ORDINARY: ${{ inputs.ordinary }}
@@ -460,8 +480,10 @@ jobs:
           chmod +x "$RUNNER_TEMP/game/horizon-client"
           ordinary=()
           if [ "$ORDINARY" = true ]; then ordinary=(--ordinary); fi
+          which=(--seed "$FIRST" --count "$COUNT")
+          if [ -n "$SEEDS" ]; then which=(--seeds "$SEEDS"); fi
           python3 tools/parity_fuzz_probe.py slices --binary "$RUNNER_TEMP/game/horizon-client" \
-            --out "$RUNNER_TEMP/parity-fuzz-results" --family "$FAMILY" --seed "$FIRST" --count "$COUNT" \
+            --out "$RUNNER_TEMP/parity-fuzz-results" --family "$FAMILY" "${which[@]}" \
             --shrink-rounds "$SHRINK" "${ordinary[@]}"
       # Each slice's output, found.json and report.json (compared values and commands, as hosted parity's logs),
       # kept 3 days. Nothing else of .local/ or the data leaves the runner.
@@ -475,7 +497,8 @@ jobs:
           retention-days: 3
 
   # The job to read: every slice's groups as one table of clusters, in its summary and in the parity-fuzz-merged
-  # artifact. It fails when a fuzz job failed (a slice compared nothing) or nothing could be merged.
+  # artifact (kept 3 days, as the slices' results: it holds compared values too). It fails when a fuzz job failed
+  # (a slice compared nothing) or nothing could be merged.
   summary:
     name: fuzz summary
     needs: [plan, fuzz]
@@ -514,4 +537,4 @@ jobs:
           name: parity-fuzz-merged
           path: ${{ runner.temp }}/merged/merged.txt
           if-no-files-found: ignore
-          retention-days: 30
+          retention-days: 3
