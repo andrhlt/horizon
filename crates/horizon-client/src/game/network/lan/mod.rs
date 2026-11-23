@@ -2362,7 +2362,7 @@ impl Game<'_> {
                 }
                 HostEvent::ChatSessionStarted(update) => {
                     let host = self.lan.as_mut()?;
-                    host.hub.broadcast(&C::PlayerInfoUpdate(*update));
+                    host.hub.broadcast_tab(&C::PlayerInfoUpdate(*update));
                 }
                 HostEvent::Joined(conn) => {
                     // The mods may refuse the login before the player is placed.
@@ -2687,6 +2687,9 @@ impl Game<'_> {
             let pass = self.level_pass;
             let mut events = if pass.first {
                 horizon_client::spans::time("lan_poll", || host.hub.poll(&mut ctx))
+            } else if self.regions.worker {
+                // A resident region's own network: its players' packets and leaves, given to it at its start.
+                horizon_client::spans::time("lan_poll", || host.hub.poll_region(&mut ctx))
             } else {
                 Vec::new()
             };

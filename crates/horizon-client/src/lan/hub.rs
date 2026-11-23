@@ -44,6 +44,7 @@ pub mod advancements;
 mod block_changes;
 pub mod chat;
 pub mod chat_filter;
+pub use chat_filter::SharedChatGuard;
 mod fake_kicks;
 mod item_particles;
 mod joined;
@@ -409,6 +410,14 @@ pub(crate) fn region_local(p: &S) -> bool {
     )
 }
 
+/// What of the events held for away players the server's thread has to see ([`Hub::away_needs_server`]).
+pub enum AwayNeed {
+    /// Every region comes home, for the reason.
+    All(&'static str),
+    /// The regions of these connections come home, each for the reason.
+    Conns(Vec<(u32, &'static str)>),
+}
+
 pub struct Hub {
     packet_drain: Option<PacketDrain>,
     deferred_payloads: std::collections::HashMap<Option<u32>, DeferredPayload>,
@@ -476,8 +485,10 @@ pub struct Hub {
     pub movement_checks: (bool, bool),
     /// The anticheat, when `server.toml` turns it on (dedicated servers).
     pub anticheat: Option<Box<super::anticheat::Anticheat>>,
-    /// The chat filter, when `server.toml` turns it on (dedicated servers).
-    pub chat_filter: Option<Box<dyn horizon_server_files::chat_guard::ChatGuard>>,
+    /// The chat filter, when `server.toml` turns it on (dedicated servers). One filter for the whole server: the
+    /// server's hub and every resident region's hold the same one, so a word list, a mute and a player's hits
+    /// are the same in every region ([`SharedChatGuard`]).
+    pub chat_filter: Option<SharedChatGuard>,
     /// The far ring, when `server.toml`'s `max_view_distance` turns it on (dedicated servers).
     pub far: Option<super::far::Far>,
     /// The `immediate_respawn` game rule, as the players were last told.
@@ -918,6 +929,16 @@ impl Hub {
         self.last_clock = from.last_clock;
         self.last_rate = from.last_rate;
         self.mods_loaded = from.mods_loaded;
+        // The chat filter is the server's: words, mutes and hits are shared, not copied.
+        if self.chat_filter.is_some() != from.chat_filter.is_some()
+            || self
+                .chat_filter
+                .as_ref()
+                .zip(from.chat_filter.as_ref())
+                .is_some_and(|(a, b)| !std::sync::Arc::ptr_eq(a, b))
+        {
+            self.chat_filter = from.chat_filter.clone();
+        }
         // The region's players are checked on its thread, with the server's settings, flag log and kicks.
         if self.anticheat.is_some() != from.anticheat.is_some() {
             self.anticheat = from.anticheat.as_ref().map(|a| Box::new(a.for_region()));
@@ -1010,8 +1031,6 @@ impl Hub {
             if let Some(view) = self.lan.shared.roster_return_scoreboard(g.conn) {
                 g.scoreboard = view;
             }
-            // Home with the player dead: the server's thread has the death to see to this tick.
-            g.death_landed = g.dead || g.health <= 0.0;
         }
         self.guests.extend(guests);
         self.native_menu_events
@@ -2745,64 +2764,7 @@ impl Hub {
                 self.away_events.push((event, credit));
                 continue;
             }
-            match event {
-                NetEvent::RawPayload(delivery) => {
-                    self.poll_raw_payload(delivery, credit, &mut events, &mut credits);
-                }
-                NetEvent::Joined(j) => {
-                    credits.push(credit);
-                    while let Some(i) = self
-                        .guests
-                        .iter()
-                        .position(|g| g.uuid == j.uuid && !g.participates_online())
-                    {
-                        let guest = self.guests.remove(i);
-                        events.push(self.leave_event(guest));
-                    }
-                    let conn = self.admit(*j, ctx);
-                    events.push(HostEvent::Joined(conn));
-                }
-                NetEvent::Left(conn, reason) => {
-                    credits.push(credit);
-                    if let Some(i) = self.guests.iter().position(|g| g.conn == conn) {
-                        let g = self.remove_guest(i, &reason);
-                        events.push(self.leave_event(g));
-                    }
-                }
-                NetEvent::Packet(conn, packet, bytes) => {
-                    if self.guest(conn).is_none()
-                        && matches!(
-                            &*packet,
-                            S::Chat(_) | S::ChatCommand(_) | S::ChatCommandSigned(_)
-                        )
-                    {
-                        log::warn!(
-                            "dropped a chat or command packet from connection {conn}: no player in the server hub"
-                        );
-                    }
-                    self.update_guest(conn, |g| {
-                        g.sender.undrained.taken(bytes);
-                        if g.left_reason.is_empty() {
-                            g.inbox.push_back(InboxItem::Packet(*packet, Some(credit)));
-                        }
-                    });
-                }
-                NetEvent::Duplicate(uuid) => {
-                    credits.push(credit);
-                    let conns: Vec<u32> = self
-                        .guests
-                        .iter()
-                        .filter(|g| g.uuid == uuid && g.participates_online())
-                        .map(|g| g.conn)
-                        .collect();
-                    for conn in conns {
-                        self.kick(
-                            conn,
-                            translatable("multiplayer.disconnect.duplicate_login", &[]),
-                        );
-                    }
-                }
-            }
+            self.handle_net_event(event, credit, ctx, &mut events, &mut credits);
         }
         // keepConnectionAlive's timeout: close a kicked client still unread a second later.
         if self.ticks.is_multiple_of(20) {
@@ -2825,6 +2787,76 @@ impl Hub {
         }
         events.push(HostEvent::InputCredits(credits));
         events
+    }
+
+    /// One network event for a player of this hub (or a join): the body of [`Hub::poll`], shared with the hub of a
+    /// region ([`Hub::poll_region`]), whose players' connections are its own.
+    fn handle_net_event(
+        &mut self,
+        event: NetEvent,
+        credit: crate::net::ingress::ReceiveLease<NetEvent>,
+        ctx: &mut TickCtx,
+        events: &mut Vec<HostEvent>,
+        credits: &mut Vec<crate::net::ingress::ReceiveLease<NetEvent>>,
+    ) {
+        match event {
+            NetEvent::RawPayload(delivery) => {
+                self.poll_raw_payload(delivery, credit, events, credits);
+            }
+            NetEvent::Joined(j) => {
+                credits.push(credit);
+                while let Some(i) = self
+                    .guests
+                    .iter()
+                    .position(|g| g.uuid == j.uuid && !g.participates_online())
+                {
+                    let guest = self.guests.remove(i);
+                    events.push(self.leave_event(guest));
+                }
+                let conn = self.admit(*j, ctx);
+                events.push(HostEvent::Joined(conn));
+            }
+            NetEvent::Left(conn, reason) => {
+                credits.push(credit);
+                if let Some(i) = self.guests.iter().position(|g| g.conn == conn) {
+                    let g = self.remove_guest(i, &reason);
+                    events.push(self.leave_event(g));
+                }
+            }
+            NetEvent::Packet(conn, packet, bytes) => {
+                if self.guest(conn).is_none()
+                    && matches!(
+                        &*packet,
+                        S::Chat(_) | S::ChatCommand(_) | S::ChatCommandSigned(_)
+                    )
+                {
+                    log::warn!(
+                        "dropped a chat or command packet from connection {conn}: no player in the server hub"
+                    );
+                }
+                self.update_guest(conn, |g| {
+                    g.sender.undrained.taken(bytes);
+                    if g.left_reason.is_empty() {
+                        g.inbox.push_back(InboxItem::Packet(*packet, Some(credit)));
+                    }
+                });
+            }
+            NetEvent::Duplicate(uuid) => {
+                credits.push(credit);
+                let conns: Vec<u32> = self
+                    .guests
+                    .iter()
+                    .filter(|g| g.uuid == uuid && g.participates_online())
+                    .map(|g| g.conn)
+                    .collect();
+                for conn in conns {
+                    self.kick(
+                        conn,
+                        translatable("multiplayer.disconnect.duplicate_login", &[]),
+                    );
+                }
+            }
+        }
     }
 
     /// Keeps server-answer packets in a frozen player's inbox (teleport, chunk batch,
@@ -3105,6 +3137,15 @@ impl Hub {
                 o.sender.send(left.clone());
             }
         });
+        // The players of the other hubs (other regions, the server's thread) read the line too: a player's leave
+        // is their own region's to handle.
+        if !g.quiet_leave {
+            for e in self.lan.shared.roster_others(|c| self.guest(c).is_some()) {
+                if self.sees(e.permission, g.uuid) {
+                    e.sender.send(left.clone());
+                }
+            }
+        }
         g
     }
 
@@ -3268,122 +3309,160 @@ impl Hub {
         self.update_chunks_in(&*ctx.world, ctx.streaming);
     }
 
-    /// Whether something an away player's connection sent has to be seen by the server's thread: a leave, a
-    /// duplicate login, or a packet that reaches past its region.
-    pub fn away_wants_server(&self) -> bool {
-        self.away_events
-            .iter()
-            .any(|(event, _)| !matches!(event, NetEvent::Packet(_, p, _) if self.away_local(p)))
+    /// Whether a native mod may have to hear what an away player's connection sent before anything else
+    /// handles it: with one, the server's thread keeps what reaches past a player's own part of the level.
+    fn mods_listen(&self) -> bool {
+        self.mods_loaded || crate::native_client_hooks::has_mods()
     }
 
-    /// Whether a packet of an away player is handled by its region: [`region_local`], `/tps` and `/mspt` while no
-    /// mod has to hear the command first ([`reads_tick_reports`]), and plain chat (a line and its
-    /// acknowledgements) while no mod or chat filter has to see it first. The region's hub relays the line to
-    /// its own players, and the server's thread carries it to the others ([`chat::RegionChat`]).
-    pub fn away_local(&self, p: &S) -> bool {
-        region_local(p)
-            || match p {
-                S::ChatCommand(c) => {
-                    self.chat_in_region()
-                        && (reads_tick_reports(&c.command) || changes_level_state(&c.command))
-                }
-                S::ChatAck(_) => self.chat_in_region(),
-                S::Chat(c) => self.chat_in_region() && self.chat_filter_passes(&c.message),
-                _ => false,
+    /// Whether the region of an away player handles a packet of theirs on its own thread. All of them, but:
+    ///
+    /// - a command, except the ones that read only the server's own reports or change the level's own state
+    ///   (`/tps`, `/mspt`, `/time`, `/weather`, `/gamerule`): it may reach any player or chunk, so for now
+    ///   it runs on the server's thread, with the regions home;
+    /// - what changes the whole level's settings (difficulty) or looks for a player in the whole level
+    ///   (a spectator's teleport);
+    /// - everything but [`region_local`] packets while a native mod may have to hear it first.
+    ///
+    /// Chat is the region's: the line goes to its own players at once, and to the others through the server's
+    /// thread ([`chat::RegionChat`]); the chat filter, its mutes and the players' hits are the server's one
+    /// ([`SharedChatGuard`]).
+    pub fn region_handles(&self, p: &S) -> bool {
+        if self.mods_listen() {
+            return region_local(p);
+        }
+        match p {
+            S::ChatCommand(c) => reads_tick_reports(&c.command) || changes_level_state(&c.command),
+            S::ChatCommandSigned(_)
+            | S::ChangeDifficulty(_)
+            | S::LockDifficulty(_)
+            | S::TeleportToEntity(_) => false,
+            _ => true,
+        }
+    }
+
+    /// Whether the region of an away player handles one of their held network events: a packet
+    /// ([`Hub::region_handles`]), their leave, or a payload of theirs, while no native mod listens.
+    pub fn region_handles_event(&self, event: &NetEvent) -> bool {
+        match event {
+            NetEvent::Packet(_, p, _) => self.region_handles(p),
+            NetEvent::Left(..) => !self.mods_listen(),
+            NetEvent::RawPayload(delivery) => delivery.conn.is_some() && !self.mods_listen(),
+            NetEvent::Duplicate(_) | NetEvent::Joined(_) => false,
+        }
+    }
+
+    /// What of the held events of away players the server's thread has to see: the commands, for which every
+    /// region comes home, the connections with another packet (their region only), or an event that belongs
+    /// to no connection (a duplicate login).
+    pub fn away_needs_server(&self) -> AwayNeed {
+        let mut conns: Vec<(u32, &'static str)> = Vec::new();
+        let mut add = |conn: u32, why: &'static str| {
+            if !conns.iter().any(|c| c.0 == conn) {
+                conns.push((conn, why));
             }
+        };
+        let mut commands = false;
+        for (event, _) in &self.away_events {
+            if self.region_handles_event(event) {
+                continue;
+            }
+            match event {
+                NetEvent::Packet(
+                    conn,
+                    p,
+                    _,
+                ) => match &**p {
+                    S::ChatCommand(_) | S::ChatCommandSigned(_) if !self.mods_listen() => {
+                        commands = true;
+                    }
+                    S::ChangeDifficulty(_) | S::LockDifficulty(_) | S::TeleportToEntity(_)
+                        if !self.mods_listen() =>
+                    {
+                        add(*conn, "level-wide");
+                    }
+                    _ => add(*conn, "native mod"),
+                },
+                NetEvent::Left(conn, _) => add(*conn, "native mod"),
+                NetEvent::RawPayload(delivery) => match delivery.conn {
+                    Some(conn) => add(conn, "native mod"),
+                    None => return AwayNeed::All("native mod"),
+                },
+                NetEvent::Duplicate(_) | NetEvent::Joined(_) => {
+                    return AwayNeed::All("duplicate login");
+                }
+            }
+        }
+        if commands {
+            AwayNeed::All("command")
+        } else {
+            AwayNeed::Conns(conns)
+        }
     }
 
-    /// Whether chat is handled by the region it is said in: no native mod has to see a line on the server's
-    /// thread before it goes out.
-    fn chat_in_region(&self) -> bool {
-        !self.mods_loaded && !crate::native_client_hooks::has_mods()
-    }
-
-    /// Whether the chat filter (which only the server's hub has) would let `text` through for any player: it
-    /// holds none of its words and nobody is muted. A text it would refuse is for the server's thread, which
-    /// counts the hit and tells the sender.
-    fn chat_filter_passes(&self, text: &str) -> bool {
-        self.chat_filter
-            .as_deref()
-            .is_none_or(|guard| !guard.matches(text) && guard.mutes(chat::now_millis()).is_empty())
-    }
-
-    /// Whether an away player sent a command, or a chat message that its region cannot relay ([`Hub::away_local`]):
-    /// it reaches every player, so every region must be home for it (the recipients' chat chains live with their
-    /// players).
-    pub fn away_chat_pending(&self) -> bool {
-        self.away_events.iter().any(|(e, _)| {
-            matches!(e, NetEvent::Packet(_, p, _) if matches!(&**p, S::Chat(_) | S::ChatCommand(_) | S::ChatCommandSigned(_)) && !self.away_local(p))
-        })
-    }
-
-    /// The packets held for `region`'s players put in their inboxes, in order, for its tick to handle.
+    /// The packets and events held for `region`'s players, in order, for its tick to handle: its connections
+    /// belong to it (`poll_region`). What the server's thread has to see first (a command) stays with every later
+    /// event of its connection, so the order of one player's packets keeps.
     pub fn give_away(&mut self, region: &mut Hub) {
         if self.away_events.is_empty() {
             return;
         }
         let mine: crate::fast_hash::FxHashSet<u32> = region.guests.iter().map(|g| g.conn).collect();
         let events = std::mem::take(&mut self.away_events);
-        let local = |p: &S| self.away_local(p);
-        // Only what stays in the region goes: a packet that reaches past it (a chat message) stays for the server's
-        // thread, with every later packet of its connection, so the order of one player's packets keeps.
         let mut blocked: crate::fast_hash::FxHashSet<u32> = Default::default();
         let (mut given, mut kept) = (Vec::new(), Vec::new());
         for e in events {
-            match &e.0 {
-                NetEvent::Packet(conn, p, _)
-                    if mine.contains(conn) && !blocked.contains(conn) && local(p) =>
-                {
-                    given.push(e)
+            let conn = match &e.0 {
+                NetEvent::Packet(conn, ..) | NetEvent::Left(conn, _) => Some(*conn),
+                NetEvent::RawPayload(delivery) => delivery.conn,
+                NetEvent::Duplicate(_) | NetEvent::Joined(_) => None,
+            };
+            match conn {
+                Some(conn) if !mine.contains(&conn) => kept.push(e),
+                Some(conn) if blocked.contains(&conn) => kept.push(e),
+                Some(_) if self.region_handles_event(&e.0) => given.push(e),
+                Some(conn) => {
+                    blocked.insert(conn);
+                    kept.push(e);
                 }
-                NetEvent::Packet(conn, ..) | NetEvent::Left(conn, _) => {
-                    if mine.contains(conn) {
-                        blocked.insert(*conn);
+                None => {
+                    if matches!(e.0, NetEvent::Duplicate(_)) {
+                        blocked.extend(mine.iter().copied());
                     }
                     kept.push(e);
                 }
-                NetEvent::RawPayload(delivery) => {
-                    blocked.extend(delivery.conn.filter(|conn| mine.contains(conn)));
-                    kept.push(e);
-                }
-                NetEvent::Duplicate(_) => {
-                    blocked.extend(mine.iter().copied());
-                    kept.push(e);
-                }
-                _ => kept.push(e),
             }
         }
         self.away_events = kept;
-        for (event, credit) in given {
-            if let NetEvent::Packet(conn, packet, bytes) = event {
-                region.update_guest(conn, |guest| {
-                    guest.sender.undrained.taken(bytes);
-                    if guest.left_reason.is_empty() {
-                        guest
-                            .inbox
-                            .push_back(InboxItem::Packet(*packet, Some(credit)));
-                    }
-                });
-            }
-        }
+        region.replay.extend(given);
     }
 
-    /// The connections whose held events the server's thread has to see, or None when one belongs to no
-    /// connection (a duplicate login).
-    pub fn away_server_conns(&self) -> Option<Vec<u32>> {
-        let mut out = Vec::new();
-        for (event, _) in &self.away_events {
-            match event {
-                NetEvent::Packet(_, p, _) if self.away_local(p) => {}
-                NetEvent::Packet(conn, ..) | NetEvent::Left(conn, _) => {
-                    if !out.contains(conn) {
-                        out.push(*conn);
-                    }
-                }
-                _ => return None,
-            }
+    /// The region's own network: the events [`Hub::give_away`] gave it, for its players. A join never comes this
+    /// way (the server's thread admits a player, and hands them to the region that owns where they stand); a
+    /// leave does, and is the region's: it saves the player and tells the others (the list, the entity, the line).
+    pub fn poll_region(&mut self, ctx: &mut TickCtx) -> Vec<HostEvent> {
+        self.end_refreshes();
+        let mut events = Vec::new();
+        let mut credits = Vec::new();
+        for (event, credit) in std::mem::take(&mut self.replay) {
+            self.handle_net_event(event, credit, ctx, &mut events, &mut credits);
         }
-        Some(out)
+        events.push(HostEvent::InputCredits(credits));
+        events
+    }
+
+    /// Away connections the server's hub holds a guest for after all (the guest came back by a hand-off that
+    /// did not name them): they are the server's again.
+    pub fn release_unowned_away(&mut self, owned: &crate::fast_hash::FxHashSet<u32>) {
+        let home: Vec<u32> = self
+            .away
+            .iter()
+            .copied()
+            .filter(|c| !owned.contains(c) && self.guest(*c).is_some())
+            .collect();
+        if !home.is_empty() {
+            self.release_away_conns(&home);
+        }
     }
 
     /// Some of the players are back: what waited for them is for the next poll, the others stay away.

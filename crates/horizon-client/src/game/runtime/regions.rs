@@ -29,6 +29,7 @@ use super::region_profile::Step;
 use super::{Dim, Game, Mob, Resources};
 use horizon_client::Result;
 use horizon_client::join_seq::{JoinList, Joined, ResidentList};
+use horizon_client::lan::hub::AwayNeed;
 use horizon_core::fast_hash::{FxHashMap, FxHashSet};
 use horizon_core::position::ChunkPos;
 use std::collections::HashMap;
@@ -714,10 +715,10 @@ enum Land {
     Slots(Vec<(usize, &'static str)>),
 }
 
-/// Whether region game `w` has something for the server's thread, so its region must come back: commands, menus
-/// of native mods, a player dying or leaving, a raid (`region_raids_want_home`). A player who stays dead costs one
-/// landing, for the death: while they wait on the death screen their region stays out, and comes home for what
-/// they send (their respawn is a packet).
+/// Whether region game `w` has something for the server's thread, so its region must come back: a command that
+/// reaches past it, a trip between levels, a menu of a native mod, a raid (`region_raids_want_home`). A player
+/// joining, leaving, dying or respawning is not among them: their region handles it, and tells the other regions
+/// through the shared list, the chat relay and the entity tracker.
 fn wants_land(w: &Game<'_>) -> bool {
     if !w.level_teleports.is_empty() || !w.server_trips.is_empty() || w.region_raids_want_home() {
         return true;
@@ -725,13 +726,7 @@ fn wants_land(w: &Game<'_>) -> bool {
     let Some(h) = w.lan.as_ref() else {
         return true;
     };
-    !h.commands.is_empty()
-        || !h.quiet.is_empty()
-        || !h.hub.native_menu_events.is_empty()
-        || h.hub
-            .guests
-            .iter()
-            .any(|g| ((g.dead || g.health <= 0.0) && !g.death_landed) || !g.left_reason.is_empty())
+    !h.commands.is_empty() || !h.quiet.is_empty() || !h.hub.native_menu_events.is_empty()
 }
 
 impl Game<'_> {
@@ -1406,6 +1401,16 @@ impl Game<'_> {
             // Players handed off to this level's regions, and those that arrived in it (a command, a portal):
             // each goes to the region that owns where they stand.
             self.deliver_set_handoffs(&mut set);
+            // A connection the server holds a guest for is not away, whatever marked it: its packets are the
+            // server's again.
+            if let Some(host) = self.lan.as_mut() {
+                let owned: FxHashSet<u32> = set
+                    .games
+                    .iter()
+                    .flat_map(|s| s.conns.iter().copied())
+                    .collect();
+                host.hub.release_unowned_away(&owned);
+            }
             self.route_strays(&mut set);
             match self.residents_must_land(&set) {
                 Some(Land::All(why)) => {
@@ -1798,33 +1803,21 @@ impl Game<'_> {
                 slots.push((k, why));
             }
         };
-        if host.hub.away_chat_pending() {
-            return Some(Land::All("chat"));
-        }
-        match host.hub.away_server_conns() {
-            None => return Some(Land::All("packet")),
-            Some(conns) => {
+        match host.hub.away_needs_server() {
+            AwayNeed::All(why) => return Some(Land::All(why)),
+            AwayNeed::Conns(conns) => {
                 // A native mod hook for a player (a command, a mod message, a leave) may reach any other
                 // player or their entities (`/invsee`, a trade, a voice group): every region comes home.
                 if !conns.is_empty() && host.hub.mods_loaded {
                     return Some(Land::All("native mod"));
                 }
-                for c in conns {
+                for (c, why) in conns {
                     match slot_of(c) {
-                        Some(k) => add(k, "packet"),
-                        None => return Some(Land::All("packet")),
+                        Some(k) => add(k, why),
+                        None => return Some(Land::All(why)),
                     }
                 }
             }
-        }
-        // A player who is in the server's hands and belongs to no region.
-        if host
-            .hub
-            .guests
-            .iter()
-            .any(|g| host.hub.here(g) && slot_of(g.conn).is_none())
-        {
-            return Some(Land::All("guest here"));
         }
         if !self.level_teleports.is_empty() {
             return Some(Land::All("teleport"));
@@ -3081,44 +3074,22 @@ pub(super) mod tests {
 
     #[test]
     #[ignore = "daily"]
-    fn a_player_who_stays_dead_lands_their_region_once_for_the_death_and_not_again_until_they_respawn()
-     {
+    fn a_player_who_dies_stays_dead_or_leaves_wants_nothing_of_the_server_thread() {
         crate::game::native_guest_turn_tests::with_guests(|game| {
             let wants = |game: &Game<'_>| wants_land(game);
             assert!(!wants(game), "two living players want nothing");
             let host = game.lan.as_mut().unwrap();
             host.hub.update_guest(12, |g| g.health = 0.0).unwrap();
-            assert!(
-                wants(game),
-                "a player dying: the death is for the server's thread"
-            );
-            // The region goes out with the player and comes home for it.
-            let host = game.lan.as_mut().unwrap();
-            let mut region = host.hub.region_shell();
-            let out = host
-                .hub
-                .split_guests(1, |conn| (conn == 12).then_some(0))
-                .remove(0);
-            region.guests.extend(out);
-            host.hub.take_guests_back(&mut region);
+            assert!(!wants(game), "a player dying is their region's to see to");
             host.hub.update_guest(12, |g| g.dead = true).unwrap();
             for _ in 0..100 {
-                assert!(
-                    !wants(game),
-                    "a dead player's region is lent again and stays out"
-                );
+                assert!(!wants(game), "a dead player's region stays out");
             }
-            // Their respawn is theirs to ask for; once alive, the next death lands once more.
-            game.guest_respawn(12);
-            let g = game.lan.as_ref().unwrap().hub.guest(12).unwrap();
-            assert!(!g.dead && !g.death_landed);
-            game.lan
-                .as_mut()
-                .unwrap()
-                .hub
-                .update_guest(12, |g| g.health = 0.0)
+            let host = game.lan.as_mut().unwrap();
+            host.hub
+                .update_guest(12, |g| g.left_reason = "left".to_owned())
                 .unwrap();
-            assert!(wants(game), "a second death lands again");
+            assert!(!wants(game), "a leave is their region's too");
         });
     }
 
@@ -3133,12 +3104,16 @@ pub(super) mod tests {
                     command: line.to_owned(),
                 })
             };
-            assert!(hub.away_local(&typed("tps")));
-            assert!(hub.away_local(&typed("mspt")));
+            assert!(hub.region_handles(&typed("tps")));
+            assert!(hub.region_handles(&typed("mspt")));
             // What reaches other players or chunks still brings every region home.
-            assert!(!hub.away_local(&typed("tps extra")));
-            assert!(!hub.away_local(&typed("kill @a")));
-            assert!(!hub.away_local(&typed("tp Bob")));
+            assert!(!hub.region_handles(&typed("tps extra")));
+            assert!(!hub.region_handles(&typed("kill @a")));
+            assert!(!hub.region_handles(&typed("tp Bob")));
+            // Chat, respawning and settings are the region's own.
+            assert!(hub.region_handles(&Serverbound::ClientCommand(
+                horizon_protocol::packets::play::ClientCommand { action: 0 }
+            )));
         });
     }
 
@@ -3578,7 +3553,7 @@ pub(super) mod tests {
                 "gamerule keep_inventory true",
                 "time query daytime",
             ] {
-                assert!(hub.away_local(&typed(line)), "{line} stays in its region");
+                assert!(hub.region_handles(&typed(line)), "{line} stays in its region");
             }
             // A command that merely starts like one, or reaches players, brings every region home.
             for line in [
@@ -3587,7 +3562,7 @@ pub(super) mod tests {
                 "kill @a",
                 "give Bob stone",
             ] {
-                assert!(!hub.away_local(&typed(line)), "{line} lands the regions");
+                assert!(!hub.region_handles(&typed(line)), "{line} lands the regions");
             }
         });
     }

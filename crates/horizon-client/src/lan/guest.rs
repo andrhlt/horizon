@@ -494,10 +494,6 @@ pub struct Guest {
     /// their client, zero after a client tick without one.
     pub known_movement: [f64; 3],
     pub dead: bool,
-    /// Whether the guest's region has come home since they died (or began to), so the server's thread has seen
-    /// the death. A region lent out again with them dead does not land for it a second time: it comes home
-    /// once for a death, and again only for what the dead player sends. Cleared by their respawn.
-    pub death_landed: bool,
     /// A cancelled die at non-positive health belongs to this body, across full restores.
     pub death_canceled: bool,
     /// `LivingEntity.deathTime`: ticks since the guest died.
@@ -889,7 +885,6 @@ impl Guest {
             moves_from_ground: false,
             known_movement: [0.0; 3],
             dead: false,
-            death_landed: false,
             death_canceled: false,
             death_time: 0,
             placed: false,

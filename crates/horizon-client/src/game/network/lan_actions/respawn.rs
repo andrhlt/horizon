@@ -118,7 +118,6 @@ impl Game<'_> {
         let (cloned, name) = host.hub.guests.update(i, |g| {
             // restartClientLoadTimerAfterRespawn.
             g.dead = false;
-            g.death_landed = false;
             g.load_timeout = horizon_client::lan::guest::CLIENT_LOADED_TIMEOUT;
             g.loading = true;
             g.death_time = 0;

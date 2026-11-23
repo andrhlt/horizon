@@ -1761,12 +1761,7 @@ impl Game<'_> {
     /// hook (where the server is out of reach).
     pub(super) fn native_text_allowed(&self, text: &str) -> Option<bool> {
         let host = self.lan.as_ref()?;
-        Some(
-            host.hub
-                .chat_filter
-                .as_ref()
-                .is_none_or(|g| !g.matches(text)),
-        )
+        Some(!host.hub.chat_filter_matches(text))
     }
     /// A system line in every player's chat and the server's log.
     pub(super) fn native_broadcast(&self, mut line: Text) {

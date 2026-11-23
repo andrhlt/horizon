@@ -91,16 +91,19 @@ fn an_away_players_packets_keep_their_order_around_one_for_the_server() {
     let conn = hub.guests[0].conn;
     hub.away.insert(conn);
     publish_packet(&hub, S::PlayerLoaded(horizon_protocol::packets::Empty));
-    // Any packet `region_local` leaves out reaches past the region.
+    // A command reaches past the region.
     publish_packet(
         &hub,
-        S::ConfigurationAcknowledged(horizon_protocol::packets::Empty),
+        S::ChatCommand(horizon_protocol::packets::play::ChatCommand {
+            command: "kill @a".to_owned(),
+        }),
     );
     publish_packet(&hub, S::ClientTickEnd(horizon_protocol::packets::Empty));
     with_input_context(|ctx| drop(hub.poll(ctx)));
     let mut region = hub.region_shell();
     region.guests.push(hub.guests.remove(0));
     hub.give_away(&mut region);
+    with_input_context(|ctx| drop(region.poll_region(ctx)));
     let inbox: Vec<_> = region.guests[0].inbox.iter().collect();
     assert!(matches!(
         inbox.as_slice(),
@@ -111,7 +114,7 @@ fn an_away_players_packets_keep_their_order_around_one_for_the_server() {
         .iter()
         .map(|(e, _)| match e {
             NetEvent::Packet(c, p, _) if *c == conn => match **p {
-                S::ConfigurationAcknowledged(_) => "server",
+                S::ChatCommand(_) => "server",
                 S::ClientTickEnd(_) => "tick end",
                 _ => "other",
             },
@@ -144,13 +147,15 @@ fn a_line_said_in_a_region_stays_there_and_is_kept_for_the_others() {
     hub.away.insert(conn);
     publish_packet(&hub, say("hello"));
     with_input_context(|ctx| drop(hub.poll(ctx)));
-    assert!(!hub.away_chat_pending());
-    assert_eq!(hub.away_server_conns(), Some(Vec::new()));
+    assert!(matches!(hub.away_needs_server(), AwayNeed::Conns(c) if c.is_empty()));
     let mut region = hub.region_shell();
     region.guests.push(hub.guests.remove(0));
     hub.give_away(&mut region);
     assert!(hub.away_events.is_empty());
-    with_input_context(|ctx| drop(region.drain_packets(ctx)));
+    with_input_context(|ctx| {
+        drop(region.poll_region(ctx));
+        drop(region.drain_packets(ctx));
+    });
     assert_eq!(region.region_chat_out.len(), 1);
     assert_eq!(region.region_chat_out[0].message.content, "hello");
     // Players elsewhere are sent it by `deliver_chat`, numbered for their own connection.
@@ -159,7 +164,8 @@ fn a_line_said_in_a_region_stays_there_and_is_kept_for_the_others() {
     assert_eq!(other.guests[0].chat_index, 1);
     drop(other_out);
 
-    // The chat filter is the server's: a line it refuses is for the server's thread, one it passes is not.
+    // The chat filter is the server's one: the region's hub holds the same, and a line it refuses is handled in
+    // the region too (the hit is counted in the shared filter, the sender told by their region).
     struct Words;
     impl horizon_server_files::chat_guard::ChatGuard for Words {
         fn matches(&self, text: &str) -> bool {
@@ -198,8 +204,15 @@ fn a_line_said_in_a_region_stays_there_and_is_kept_for_the_others() {
     }
     let (mut hub, _out) = hub_with_a_guest();
     hub.set_chat_filter(Some(Box::new(Words)));
-    assert!(hub.away_local(&say("hello")));
-    assert!(!hub.away_local(&say("a badword here")));
+    assert!(hub.region_handles(&say("hello")));
+    assert!(hub.region_handles(&say("a badword here")));
+    let mut region = hub.region_shell();
+    region.copy_region_settings(&hub);
+    assert!(std::sync::Arc::ptr_eq(
+        region.chat_filter.as_ref().unwrap(),
+        hub.chat_filter.as_ref().unwrap()
+    ));
+    assert!(region.chat_filter_matches("a badword here"));
 
     // A command reaches every player: every region must come home for it.
     let (mut hub, _out) = hub_with_a_guest();
@@ -211,7 +224,7 @@ fn a_line_said_in_a_region_stays_there_and_is_kept_for_the_others() {
         }),
     );
     with_input_context(|ctx| drop(hub.poll(ctx)));
-    assert!(hub.away_chat_pending());
+    assert!(matches!(hub.away_needs_server(), AwayNeed::All("command")));
 }
 
 /// The timer's balance is given a player's own time since it was last ticked, by whichever hub ticks it: a player

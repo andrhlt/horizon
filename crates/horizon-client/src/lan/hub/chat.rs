@@ -296,7 +296,8 @@ impl Hub {
         {
             events.push(HostEvent::ChatSessionStarted(Box::new(update)));
         } else {
-            self.broadcast(&C::PlayerInfoUpdate(update));
+            // The list of every hub: the players of other regions read the key too.
+            self.broadcast_tab(&C::PlayerInfoUpdate(update));
         }
     }
 

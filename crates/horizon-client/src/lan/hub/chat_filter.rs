@@ -62,10 +62,32 @@ fn red(text: &str) -> Tag {
     t
 }
 
+/// The server's chat filter, shared by the server's hub and the hubs of its regions: a region handles its own
+/// players' chat on its own thread, and the words, the mutes and the hits behind them are the server's.
+pub type SharedChatGuard = std::sync::Arc<std::sync::Mutex<Box<dyn ChatGuard>>>;
+
+fn locked(guard: &SharedChatGuard) -> std::sync::MutexGuard<'_, Box<dyn ChatGuard>> {
+    guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl Hub {
     /// `server.toml`'s `[chat_filter]` (dedicated servers); `None` turns it off.
     pub fn set_chat_filter(&mut self, guard: Option<Box<dyn ChatGuard>>) {
-        self.chat_filter = guard;
+        self.chat_filter = guard.map(|g| std::sync::Arc::new(std::sync::Mutex::new(g)));
+    }
+
+    /// Whether the filter holds a word of `text`: false without a filter.
+    pub fn chat_filter_matches(&self, text: &str) -> bool {
+        self.chat_filter
+            .as_ref()
+            .is_some_and(|g| locked(g).matches(text))
+    }
+
+    /// Whether nobody is muted at `now` (true without a filter).
+    pub fn chat_filter_has_no_mutes(&self, now: i64) -> bool {
+        self.chat_filter
+            .as_ref()
+            .is_none_or(|g| locked(g).mutes(now).is_empty())
     }
 
     pub fn chat_filter_on(&self) -> bool {
@@ -81,9 +103,10 @@ impl Hub {
         place: Place,
         events: &mut Vec<HostEvent>,
     ) -> bool {
-        let Some(guard) = self.chat_filter.as_deref_mut() else {
+        let Some(shared) = self.chat_filter.clone() else {
             return true;
         };
+        let mut guard = locked(&shared);
         let (uuid, now) = (self.guests[i].uuid, now_millis());
         let hit = texts.iter().any(|t| guard.matches(t));
         let muted = place.is_chat().then(|| guard.muted(uuid, now)).flatten();
@@ -134,9 +157,10 @@ impl Hub {
         by: &str,
         reason: Option<String>,
     ) {
-        let Some(guard) = self.chat_filter.as_deref_mut() else {
+        let Some(shared) = self.chat_filter.clone() else {
             return;
         };
+        let mut guard = locked(&shared);
         let now = now_millis();
         guard.mute(uuid, name, until, by, reason);
         let Some(text) = guard.muted(uuid, now).map(|m| muted_notice(m, now)) else {
@@ -152,14 +176,14 @@ impl Hub {
 
     /// The mutes in force, by name.
     pub fn mutes(&self) -> Vec<Mute> {
-        self.chat_filter.as_deref().map_or_else(Vec::new, |g| {
-            g.mutes(now_millis()).into_iter().cloned().collect()
+        self.chat_filter.as_ref().map_or_else(Vec::new, |g| {
+            locked(g).mutes(now_millis()).into_iter().cloned().collect()
         })
     }
 
     /// `/unmute <player>`: the name as it was muted, if they were.
     pub fn unmute(&mut self, name: &str) -> Option<String> {
-        self.chat_filter.as_deref_mut()?.unmute(name)
+        locked(self.chat_filter.as_ref()?).unmute(name)
     }
 
     /// Writes a refused text to the filter's own log, when it keeps one; `Err` says why it couldn't.
@@ -174,8 +198,8 @@ impl Hub {
         action: Action,
         text: &str,
     ) -> Result<(), String> {
-        match self.chat_filter.as_deref_mut() {
-            Some(guard) => guard.log(now, name, uuid, place, count, action, text),
+        match self.chat_filter.as_ref() {
+            Some(guard) => locked(guard).log(now, name, uuid, place, count, action, text),
             None => Ok(()),
         }
     }
