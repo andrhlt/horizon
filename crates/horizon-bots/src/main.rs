@@ -89,6 +89,9 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
   --attack-rounds N      stop after N rounds of attacks (each hits every target seen so far once);
                          default no limit
   --no-swing             attack without swinging (a kill aura hiding its swing, for the anticheat's tests)
+  --no-respawn           stay dead: no respawn request at SetHealth 0 (a player left on the death screen)
+  --run TICK:COMMAND     a command (no slash) each bot types TICK ticks after joining, as a player does; repeat
+                         the flag for more (the command runs as that player, not on the console)
   --no-loaded            never say the level is loaded (ServerboundPlayerLoadedPacket): a vanilla server
                          ignores the player's moves and actions for its first 3 seconds
   --no-read              stop reading from the server once spawned (a client that lets the
@@ -205,6 +208,10 @@ struct Options {
     ack_rate: Option<f32>,
     no_read: bool,
     no_loaded: bool,
+    /// --no-respawn: a dead bot stays on the death screen.
+    no_respawn: bool,
+    /// --run: (tick after joining, command) every bot types.
+    run: Vec<(u64, String)>,
     height: f64,
     ground: bool,
     /// --raw: (tick after joining, packet id, body).
@@ -250,6 +257,8 @@ fn options() -> Result<Options, String> {
         ack_rate: None,
         no_read: false,
         no_loaded: false,
+        no_respawn: false,
+        run: Vec::new(),
         height: 24.0,
         ground: false,
         raw: Vec::new(),
@@ -280,6 +289,10 @@ fn options() -> Result<Options, String> {
         }
         if arg == "--crits" {
             o.crits = true;
+            continue;
+        }
+        if arg == "--no-respawn" {
+            o.no_respawn = true;
             continue;
         }
         if arg == "--no-loaded" {
@@ -340,6 +353,11 @@ fn options() -> Result<Options, String> {
             }
             "--far-after" => o.far_after = value.parse().map_err(|_| number("seconds"))?,
             "--far-dump" => o.far_dump = Some(value),
+            "--run" => {
+                let (tick, command) = value.split_once(':').ok_or_else(|| number("TICK:COMMAND"))?;
+                let tick = tick.parse().map_err(|_| number("TICK:COMMAND"))?;
+                o.run.push((tick, command.trim_start_matches('/').to_owned()));
+            }
             "--give" => {
                 for part in value.split(',') {
                     let n: Vec<&str> = part.split(':').collect();
@@ -397,7 +415,7 @@ fn options() -> Result<Options, String> {
             _ => return Err(format!("unknown option {arg}; --help lists them")),
         }
     }
-    const BEHAVIOURS: [&str; 18] = [
+    const BEHAVIOURS: [&str; 19] = [
         "scatter",
         "idle",
         "walk",
@@ -461,6 +479,11 @@ struct Bot {
     target: Mutex<Vec<(u128, Option<i32>)>>,
     /// The last SetHealth.
     health: Mutex<Option<f32>>,
+    /// The bot holds every chunk round the one it stands in, out to the view distance less one (checked once a
+    /// second): its view has loaded. The report's `ready` counts these.
+    ready: AtomicBool,
+    /// --no-respawn: the bot stays dead.
+    no_respawn: AtomicBool,
     /// Respawn requests sent (SetHealth reached 0).
     respawns: AtomicU64,
     /// --far: the far terrain it asks for.
@@ -1138,7 +1161,7 @@ fn read(
             cb::SET_HEALTH => {
                 if let Ok(play::Clientbound::SetHealth(p)) = play::Clientbound::decode(id, &body) {
                     *lock(&bot.health) = Some(p.health);
-                    if wants_respawn(p.health) {
+                    if wants_respawn(p.health) && !bot.no_respawn.load(Ordering::Relaxed) {
                         // The death screen's button: ServerboundClientCommandPacket, action 0.
                         let _ = send(
                             play::Serverbound::ClientCommand(play::ClientCommand { action: 0 })
@@ -1255,6 +1278,7 @@ fn run_bot(
         .flat_map(|names| names.split(','))
         .map(|name| (target_uuid(name), None))
         .collect();
+    bot.no_respawn.store(o.no_respawn, Ordering::Relaxed);
     bot.online.store(true, Ordering::SeqCst);
     {
         let (writer, bot) = (writer.clone(), bot.clone());
@@ -1348,6 +1372,13 @@ fn run_bot(
             pos = at;
         }
         let here = ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+        if tick % 20 == 0 {
+            let reach = i32::from(o.view_distance).max(2) - 1;
+            let held = lock(&bot.held);
+            let complete = (-reach..=reach)
+                .all(|dx| (-reach..=reach).all(|dz| held.contains(&(here.0 + dx, here.1 + dz))));
+            bot.ready.store(complete, Ordering::Relaxed);
+        }
         // The abusive client doesn't wait for its chunk, as a real client must.
         if behaviour == Behaviour::Hotbar {
             // Server time packets pace requests even during slow startup ticks.
@@ -1419,7 +1450,8 @@ fn run_bot(
                 Behaviour::Walk => walk_step(&mut pos, &mut target, spawn, cruise, &mut random),
                 Behaviour::Roam => {
                     // On the ground the server chose: the height it gave, which a step leaves alone.
-                    walk_step(&mut pos, &mut target, home, pos[1], &mut random);
+                    let height = pos[1];
+                    walk_step(&mut pos, &mut target, home, height, &mut random);
                 }
                 Behaviour::Fight => {
                     let near = lock(&bot.entities).nearest(pos, o.pvp, &bots);
@@ -1512,6 +1544,16 @@ fn run_bot(
                         input,
                         changed: Vec::new(),
                         carried: None,
+                    })
+                    .encode(),
+                );
+            }
+        }
+        for (at, command) in &o.run {
+            if *at == tick {
+                send(
+                    play::Serverbound::ChatCommand(play::ChatCommand {
+                        command: command.clone(),
                     })
                     .encode(),
                 );
@@ -1709,6 +1751,8 @@ fn main() {
                 "waited_ticks": total(|b| &b.waited),
                 "attacks": total(|b| &b.attacks),
                 // Bots whose far plan is done: every tile asked for and answered.
+                // Bots that hold their whole view (the chunks round them out to the view distance less one).
+                "ready": bots.iter().filter(|b| b.ready.load(Ordering::Relaxed)).count(),
                 "far_done": bots.iter().filter(|b| b.far.is_finished()).count(),
             })
         );
@@ -1764,6 +1808,7 @@ fn main() {
             "error": *lock(&b.error),
             "attacks": b.attacks.load(Ordering::Relaxed),
             "respawns": b.respawns.load(Ordering::Relaxed),
+            "ready": b.ready.load(Ordering::Relaxed),
             "health": *lock(&b.health),
             "far": (o.far > 0).then(|| b.far.report()),
         })).collect::<Vec<_>>(),
