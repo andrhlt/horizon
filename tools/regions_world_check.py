@@ -396,14 +396,25 @@ def make_world(args):
         bots, lines = start_bots(args, port, 'Seed', args.players, 'scatter', 600, out / 'make-world-bots.json', join_every=0.3)
         time.sleep(args.players * 0.3 + 150)
         end, nether = max(1, args.players // 14), max(1, args.players // 30)
-        for i in range(args.players - end - nether, args.players - nether):
-            server.console(f'execute in minecraft:the_end run tp Seed{i} {(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}')
-        for i in range(args.players - nether, args.players):
-            server.console(f'execute in minecraft:the_nether run tp Seed{i} {(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}')
-        time.sleep(40)
+        moves = [(i, END, f'{(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}') for i in range(args.players - end - nether, args.players - nether)]
+        moves += [(i, NETHER, f'{(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}') for i in range(args.players - nether, args.players)]
+        # A console teleport can miss (a chunk not ready, a pull-back): send it again until the player is there.
+        for attempt in range(5):
+            pending = []
+            for i, dim, at in moves:
+                got = where(server, f'Seed{i}')
+                if not got or got[0] != dim:
+                    pending.append((i, dim, at))
+            if not pending:
+                break
+            for i, dim, at in pending:
+                server.console(f'execute in {dim} run tp Seed{i} {at}')
+            time.sleep(15)
+        # The bots leave before the save: a player is saved where the server has them, in their own level.
+        stop_bots(bots)
+        time.sleep(5)
         server.console('save-all flush')
         time.sleep(20)
-        stop_bots(bots)
     finally:
         server.stop()
     world = directory / 'world'
