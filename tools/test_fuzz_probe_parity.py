@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Probe only, never for main (#20446): slices of tools/parity_fuzz.py as one sharded harness (parity_fuzz_probe)."""
+"""Probe only, never for main (#20446): round 1's clusters, one seed each, shrunk (parity_fuzz_probe)."""
 from parity_fuzz_probe import run
 
-PARITY_SHARDS = 49
+SEEDS = {'items': [9, 557, 553, 559, 24, 21, 23, 485, 707, 299, 691, 581],
+         'blockdata': [69, 55, 56, 3, 351], 'retype': [11, 14, 44, 106, 124]}
+PARITY_SHARDS = 22
 
 
 def slices():
-    out = []
-    for family in ('items', 'blockdata', 'retype'):
-        for index in range(16):
-            out.append([family, '--seed', str(1 + 50 * index), '--count', '50', '--batch', '25', '--shrink-rounds', '1'])
-    return out + [['--smoke']]
+    return [[family, '--seed', str(seed), '--count', '1', '--shrink-rounds', '3']
+            for family, seeds in SEEDS.items() for seed in seeds]
 
 
 if __name__ == '__main__':
