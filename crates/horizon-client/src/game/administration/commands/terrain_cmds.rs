@@ -446,7 +446,7 @@ impl Game<'_> {
                     );
                     true
                 } else if let Some(saved) = self.block_entity_nbt(p) {
-                    pending.record_saved(p, &saved);
+                    pending.record_saved(p, &saved, &self.items().component_defaults);
                     true
                 } else {
                     false

@@ -200,8 +200,15 @@ impl Pending {
         }
         items.split_stacks(stacks)
     }
-    /// Remember a decorated pot's sherds from its saved block entity.
-    pub(super) fn record_saved(&mut self, pos: [i32; 3], tag: &horizon_core::nbt::Tag) {
+    /// Remember a decorated pot's sherds from its saved block entity, each taken
+    /// in against the world's item `prototypes` (`ItemStack.CODEC`'s `applyPatch`)
+    /// so the dropped sherd stacks with the ones already in play.
+    pub(super) fn record_saved(
+        &mut self,
+        pos: [i32; 3],
+        tag: &horizon_core::nbt::Tag,
+        prototypes: &horizon_client::item_data::ItemPrototypes,
+    ) {
         use horizon_core::nbt::Tag;
         if tag.get("id") != Some(&Tag::String("minecraft:decorated_pot".into())) {
             return;
@@ -214,7 +221,10 @@ impl Pending {
                 damage: 0,
                 extra: None,
             }),
-            Some(t) => horizon_client::save::item_from_nbt(t),
+            Some(t) => horizon_client::save::item_from_nbt(t).map(|mut stack| {
+                horizon_client::item_data::clean_stack(&mut stack, prototypes);
+                stack
+            }),
             None => None,
         };
         self.pot.insert(
@@ -640,7 +650,8 @@ impl GameLevel<'_> {
             let block = self.facts.get(state).name.clone();
             self.pending.record_from(self.world, at, &entity, &block);
         } else if let Some(tag) = saved_entity(self.world, [pos.x, pos.y, pos.z]) {
-            self.pending.record_saved(at, &tag);
+            self.pending
+                .record_saved(at, &tag, &self.items.component_defaults);
         }
         let dynamic = self.pending.dynamic(at);
         let machine = self
@@ -710,7 +721,7 @@ impl GameLevel<'_> {
                 self.world.block_lock(key),
             );
         } else if let Some(tag) = saved_entity(self.world, at) {
-            copied.record_saved(at, &tag);
+            copied.record_saved(at, &tag, &self.items.component_defaults);
         }
         let dynamic = copied.dynamic(at);
         let roll = horizon_client::items::BlockLootRoll {
@@ -1973,5 +1984,38 @@ mod split_drop_copy_tests {
         assert!(names(&dropped[..1])[0].1.is_some());
         assert_ne!(names(&dropped[..1]), expected_fixed);
         assert_eq!(names(&dropped[1..]), expected_fixed);
+    }
+}
+
+#[cfg(test)]
+mod saved_sherd_tests {
+    use super::Pending;
+    use crate::game::game_tests::tests::server_game;
+    use horizon_client::items::ItemStack;
+
+    /// A saved pot's sherd template is taken in against the world's item
+    /// prototypes when it becomes a drop, so it stacks with the sherds in play;
+    /// the saved block entity keeps the template as written.
+    #[test]
+    #[ignore = "daily"]
+    fn a_saved_pots_sherds_drop_as_the_worlds_stacks() {
+        let mut resources = None;
+        let game = server_game(&mut resources);
+        let tag = horizon_core::nbt::parse_snbt(
+            r#"{id:"minecraft:decorated_pot",sherds:{back:"minecraft:brick",front:{id:"minecraft:angler_pottery_sherd",count:1,components:{"minecraft:max_stack_size":64}}}}"#,
+        )
+        .unwrap()
+        .0;
+        let saved = tag.clone();
+        let mut pending = Pending::default();
+        pending.record_saved([0, 0, 0], &tag, &game.items().component_defaults);
+        assert_eq!(
+            pending.dynamic([0, 0, 0]),
+            vec![
+                ItemStack::new("minecraft:brick", 1),
+                ItemStack::new("minecraft:angler_pottery_sherd", 1),
+            ]
+        );
+        assert!(tag == saved, "the saved template is left as written");
     }
 }

@@ -1843,7 +1843,8 @@ impl Game<'_> {
             self.pending
                 .record(pos, &entity, &name, custom, self.world.block_lock(key));
         } else if let Some(tag) = super::spill::saved_entity(&self.world, pos) {
-            self.pending.record_saved(pos, &tag);
+            let prototypes = self.items().component_defaults.clone();
+            self.pending.record_saved(pos, &tag, &prototypes);
         }
         // Block.dropFromExplosion (only TntBlock refuses), or what the
         // block's parts answer: it gates spawnAfterBreak and the loot.
