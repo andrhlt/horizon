@@ -96,7 +96,10 @@ impl SectionMap {
 
     /// Who owns chunk `(x, z)`: any region thread asks this about a chunk next to its own.
     pub fn owner_of_chunk(&self, (x, z): (i32, i32)) -> Option<Owner> {
-        self.owner((x >> super::regions::SECTION_SHIFT, z >> super::regions::SECTION_SHIFT))
+        self.owner((
+            x >> super::regions::SECTION_SHIFT,
+            z >> super::regions::SECTION_SHIFT,
+        ))
     }
 
     /// Takes `section` for `id` as a `kind`, if no other region owns it. Atomic: of two regions that ask for the
@@ -184,13 +187,19 @@ impl SectionMap {
             if mine == Kind::Ring {
                 continue;
             }
-            let reach = if mine == Kind::Ticking { MERGE_RADIUS } else { 1 };
+            let reach = if mine == Kind::Ticking {
+                MERGE_RADIUS
+            } else {
+                1
+            };
             for dx in -reach..=reach {
                 for dz in -reach..=reach {
                     let Some(o) = self.owner((x + dx, z + dz)) else {
                         continue;
                     };
-                    if o.id != id && o.kind != Kind::Ring && joins(mine, o.kind, dx.abs().max(dz.abs()))
+                    if o.id != id
+                        && o.kind != Kind::Ring
+                        && joins(mine, o.kind, dx.abs().max(dz.abs()))
                     {
                         out.insert(o.id);
                     }
@@ -251,7 +260,9 @@ mod tests {
         let winners: Vec<RegionId> = (1..=16u64)
             .map(|id| {
                 let map = std::sync::Arc::clone(&map);
-                std::thread::spawn(move || (map.claim(id, (7, -3), Kind::Ticking) == Claim::Held).then_some(id))
+                std::thread::spawn(move || {
+                    (map.claim(id, (7, -3), Kind::Ticking) == Claim::Held).then_some(id)
+                })
             })
             .collect::<Vec<_>>()
             .into_iter()

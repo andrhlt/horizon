@@ -320,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_profile_stays_with_its_player_while_their_region_has_them_and_stops_when_they_leave() {
         crate::game::native_guest_turn_tests::with_guests(|game| {
             asker_of(game, 12);

@@ -152,7 +152,8 @@ impl Game<'_> {
         let swap = self.enter_guest(c.conn)?;
         self.chat_capture = Some(Vec::new());
         let level = std::mem::replace(&mut self.ui.registries.permission, c.permission);
-        self.regions.deferrable = !c.quiet && crate::game::region_tasks::is_teleport_command(&c.command);
+        self.regions.deferrable =
+            !c.quiet && crate::game::region_tasks::is_teleport_command(&c.command);
         let ok = if self.perform_native_command(c.conn, c.permission, &c.command) {
             true
         } else if c.quiet {

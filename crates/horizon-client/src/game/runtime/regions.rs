@@ -3065,6 +3065,7 @@ pub(super) mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn a_player_who_stays_dead_lands_their_region_once_for_the_death_and_not_again_until_they_respawn()
      {
         crate::game::native_guest_turn_tests::with_guests(|game| {
@@ -3107,6 +3108,7 @@ pub(super) mod tests {
     }
 
     #[test]
+    #[ignore = "daily"]
     fn tps_and_mspt_are_answered_by_the_region_of_the_player_who_typed_them() {
         use horizon_protocol::packets::play::{ChatCommand, Serverbound};
         crate::game::native_guest_turn_tests::with_guests(|game| {
@@ -3544,6 +3546,7 @@ pub(super) mod tests {
         });
     }
     #[test]
+    #[ignore = "daily"]
     fn time_weather_and_gamerule_run_in_the_region_of_the_player_who_typed_them() {
         use horizon_protocol::packets::play::{ChatCommand, Serverbound};
         crate::game::native_guest_turn_tests::with_guests(|game| {

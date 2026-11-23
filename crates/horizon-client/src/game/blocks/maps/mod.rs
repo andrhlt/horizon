@@ -1011,7 +1011,9 @@ impl Game<'_> {
             .pool
             .get_or_insert_with(|| std::sync::Arc::new(std::sync::atomic::AtomicI32::new(last)))
             .clone();
-        let base = pool.fetch_max(last, std::sync::atomic::Ordering::SeqCst).max(last);
+        let base = pool
+            .fetch_max(last, std::sync::atomic::Ordering::SeqCst)
+            .max(last);
         w.maps.pool = Some(pool);
         w.maps.last_id = Some(base);
         w.maps.lent_base = base;
@@ -1019,13 +1021,23 @@ impl Game<'_> {
     /// The maps region game `w` made while it was lent (their data is the server's to save) and its ids.
     pub(super) fn take_maps_back(&mut self, w: &mut Game<'_>) {
         let base = w.maps.lent_base;
-        let made: Vec<i32> = w.maps.data.keys().copied().filter(|id| *id > base).collect();
+        let made: Vec<i32> = w
+            .maps
+            .data
+            .keys()
+            .copied()
+            .filter(|id| *id > base)
+            .collect();
         for id in made {
             if let Some(m) = w.maps.data.remove(&id) {
                 self.maps.data.insert(id, m);
             }
         }
-        w.maps.lent_base = w.maps.pool.as_ref().map_or(-1, |p| p.load(std::sync::atomic::Ordering::SeqCst));
+        w.maps.lent_base = w
+            .maps
+            .pool
+            .as_ref()
+            .map_or(-1, |p| p.load(std::sync::atomic::Ordering::SeqCst));
         self.sync_map_ids();
     }
     /// The saved last id follows the shared counter.
