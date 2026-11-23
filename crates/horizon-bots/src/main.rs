@@ -1176,6 +1176,11 @@ fn read(
                 }
                 Ok(())
             }
+            cb::RESPAWN => {
+                // A new level (or a respawn): vanilla's client drops its chunks and the server sends them again.
+                lock(&bot.held).clear();
+                Ok(())
+            }
             cb::SET_HEALTH => {
                 if let Ok(play::Clientbound::SetHealth(p)) = play::Clientbound::decode(id, &body) {
                     *lock(&bot.health) = Some(p.health);
@@ -1692,6 +1697,7 @@ fn behaviour_of(mode: &str, index: usize) -> Behaviour {
         "walk" => Behaviour::Walk,
         "explore" => Behaviour::Explore,
         "scatter" => Behaviour::Scatter,
+        "roam" => Behaviour::Roam,
         "fight" => Behaviour::Fight,
         "flood-move" => Behaviour::FloodMove,
         "flood-acks" => Behaviour::FloodAcks,
@@ -2036,6 +2042,16 @@ mod tests {
         assert_eq!(watched.respawns.load(Ordering::Relaxed), 1);
         server.writer.shutdown();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn every_listed_behaviour_has_its_own_name() {
+        for name in BEHAVIOURS {
+            if name == "mixed" {
+                continue;
+            }
+            assert_eq!(behaviour_of(name, 0).name(), name, "--behaviour {name}");
+        }
     }
 
     fn feed(entities: &mut Entities, packet: &Clientbound) {
