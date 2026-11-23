@@ -157,6 +157,13 @@ impl InboxItem {
     }
 }
 
+/// What a player's game does for them once it holds them where they stand ([`Guest::after_arrival`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AfterArrival {
+    /// A respawn at the world spawn: find the free column once the chunks around it are lit.
+    WorldSpawnTrip,
+}
+
 pub struct Guest {
     /// Identity generation and journal binding travel with the actual player record.
     pub residency: crate::join_seq::residency::member::Member,
@@ -496,6 +503,13 @@ pub struct Guest {
     pub dead: bool,
     /// A cancelled die at non-positive health belongs to this body, across full restores.
     pub death_canceled: bool,
+    /// What the game that owns the ground the player stands on does at the start of its next tick: a respawn
+    /// that waits for the world spawn's chunks is set up there, in whichever region ends up holding the player
+    /// (a split, a merge or a hand-off may move them before then).
+    pub after_arrival: Option<AfterArrival>,
+    /// The player's respawn goes to another level than their region's: the region comes home for it, and the
+    /// server's thread respawns them.
+    pub respawn_for_server: bool,
     /// `LivingEntity.deathTime`: ticks since the guest died.
     pub death_time: u32,
     /// The player record is materialized for gameplay and handle lookup.
@@ -886,6 +900,8 @@ impl Guest {
             known_movement: [0.0; 3],
             dead: false,
             death_canceled: false,
+            after_arrival: None,
+            respawn_for_server: false,
             death_time: 0,
             placed: false,
             handover: None,

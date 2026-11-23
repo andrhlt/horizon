@@ -1,4 +1,5 @@
 use super::*;
+use horizon_client::lan::guest::AfterArrival;
 
 impl Game<'_> {
     pub(in crate::game) fn guest_respawn(&mut self, conn: u32) {
@@ -12,6 +13,25 @@ impl Game<'_> {
         let world = self.world_spawn_position();
         let spawn = host.hub.guests[i].spawn.unwrap_or(world);
         if !host.hub.guests[i].dead {
+            return;
+        }
+        // A player of a resident region respawns in it, when the respawn point is in the region's level: the
+        // chunks round the world spawn are theirs to load (the split, merge or hand-off that follows takes the
+        // player to the region that has them). A respawn point in another level is a trip between levels: the
+        // region comes home for it, and the server's thread respawns the player ([`Game::run_after_arrivals`]).
+        if self.regions.link.is_some()
+            && self.options.dedicated.is_some()
+            && host.hub.guests[i]
+                .respawn_elsewhere
+                .as_ref()
+                .is_some_and(|saved| {
+                    RespawnConfig::from_saved(saved).dim != self.dim
+                        || host.hub.guests[i].dimension != self.dim.id()
+                })
+        {
+            if let Some(host) = self.lan.as_mut() {
+                host.hub.guests.update(i, |g| g.respawn_for_server = true);
+            }
             return;
         }
         let (uuid, entity_id) = (host.hub.guests[i].uuid, host.hub.guests[i].entity_id);
@@ -246,8 +266,13 @@ impl Game<'_> {
             self.respawn_trip(conn, config);
         } else if in_frame_bed.is_none() && forced_spawn.is_none() {
             // TeleportTransition.createDefault: no point of its own, so the
-            // world spawn's free column once its chunks have loaded.
-            self.world_spawn_trip(conn, None);
+            // world spawn's free column once its chunks have loaded. A resident region's player gets it where
+            // they end up holding them, which may be another region (`Game::run_after_arrivals`).
+            if self.regions.link.is_some() {
+                host_after_arrival(self, i, AfterArrival::WorldSpawnTrip);
+            } else {
+                self.world_spawn_trip(conn, None);
+            }
         }
         if let Some(c) = in_frame_bed
             && self.dim == crate::game::Dim::Overworld
@@ -815,5 +840,51 @@ impl Game<'_> {
         std::mem::swap(&mut self.combat, &mut tracker);
         self.guest_combat.insert(conn, tracker);
         text
+    }
+}
+
+/// Sets what the game that ends up holding guest `i` does for them at the start of its next tick.
+fn host_after_arrival(game: &mut Game<'_>, i: usize, what: AfterArrival) {
+    if let Some(host) = game.lan.as_mut() {
+        host.hub.guests.update(i, |g| g.after_arrival = Some(what));
+    }
+}
+
+impl Game<'_> {
+    /// What a player's game owes them at the start of its tick: a respawn at the world spawn finds its free
+    /// column ([`AfterArrival`]), a respawn into another level is made (their region came home for it). A
+    /// stray the server's thread holds for a level with resident regions waits: its region does it.
+    pub(in crate::game) fn run_after_arrivals(&mut self) {
+        let on_server = self.regions.link.is_none();
+        let waits = on_server && self.level_has_residents(self.dim);
+        let Some(host) = self.lan.as_ref() else {
+            return;
+        };
+        let mut respawns = Vec::new();
+        let mut trips = Vec::new();
+        for g in host.hub.guests.iter() {
+            if on_server && g.respawn_for_server {
+                respawns.push(g.conn);
+            }
+            if !waits && g.placed && g.after_arrival == Some(AfterArrival::WorldSpawnTrip) {
+                trips.push(g.conn);
+            }
+        }
+        for conn in respawns {
+            if let Some(host) = self.lan.as_mut()
+                && let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn)
+            {
+                host.hub.guests.update(i, |g| g.respawn_for_server = false);
+            }
+            self.guest_respawn(conn);
+        }
+        for conn in trips {
+            if let Some(host) = self.lan.as_mut()
+                && let Some(i) = host.hub.guests.iter().position(|g| g.conn == conn)
+            {
+                host.hub.guests.update(i, |g| g.after_arrival = None);
+            }
+            self.world_spawn_trip(conn, None);
+        }
     }
 }

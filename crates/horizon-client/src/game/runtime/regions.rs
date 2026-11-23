@@ -720,13 +720,22 @@ enum Land {
 /// joining, leaving, dying or respawning is not among them: their region handles it, and tells the other regions
 /// through the shared list, the chat relay and the entity tracker.
 fn wants_land(w: &Game<'_>) -> bool {
-    if !w.level_teleports.is_empty() || !w.server_trips.is_empty() || w.region_raids_want_home() {
+    // A respawn at the world spawn of the region's own level waits for chunks in the region, as any region's
+    // player does: only a trip between levels is the server thread's.
+    let trips_between_levels = w
+        .server_trips
+        .iter()
+        .any(|t| !(t.world_spawn && t.dim == w.dim));
+    if !w.level_teleports.is_empty() || trips_between_levels || w.region_raids_want_home() {
         return true;
     }
     let Some(h) = w.lan.as_ref() else {
         return true;
     };
-    !h.commands.is_empty() || !h.quiet.is_empty() || !h.hub.native_menu_events.is_empty()
+    !h.commands.is_empty()
+        || !h.quiet.is_empty()
+        || !h.hub.native_menu_events.is_empty()
+        || h.hub.guests.iter().any(|g| g.respawn_for_server)
 }
 
 impl Game<'_> {
@@ -3078,15 +3087,26 @@ pub(super) mod tests {
         crate::game::native_guest_turn_tests::with_guests(|game| {
             let wants = |game: &Game<'_>| wants_land(game);
             assert!(!wants(game), "two living players want nothing");
-            let host = game.lan.as_mut().unwrap();
-            host.hub.update_guest(12, |g| g.health = 0.0).unwrap();
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(12, |g| g.health = 0.0)
+                .unwrap();
             assert!(!wants(game), "a player dying is their region's to see to");
-            host.hub.update_guest(12, |g| g.dead = true).unwrap();
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(12, |g| g.dead = true)
+                .unwrap();
             for _ in 0..100 {
                 assert!(!wants(game), "a dead player's region stays out");
             }
-            let host = game.lan.as_mut().unwrap();
-            host.hub
+            game.lan
+                .as_mut()
+                .unwrap()
+                .hub
                 .update_guest(12, |g| g.left_reason = "left".to_owned())
                 .unwrap();
             assert!(!wants(game), "a leave is their region's too");
