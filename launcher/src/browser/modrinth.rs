@@ -278,11 +278,11 @@ fn parse_search_page(found: &Value, query: &Query) -> Result<SearchPage, String>
     let hits = found["hits"]
         .as_array()
         .ok_or_else(|| crate::i18n::tr("The search didn't go through.").to_string())?;
+    let total = found["total_hits"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
     let offset = query.offset + hits.len();
-    let more = hits.len() == query.limit.clamp(1, 100)
-        && found["total_hits"]
-            .as_u64()
-            .is_none_or(|total| (offset as u64) < total);
+    let more = hits.len() == query.limit.clamp(1, 100) && total.is_none_or(|total| offset < total);
     let projects = hits
         .iter()
         .filter_map(parse_hit)
@@ -294,6 +294,7 @@ fn parse_search_page(found: &Value, query: &Query) -> Result<SearchPage, String>
     Ok(SearchPage {
         projects,
         next_offset: more.then_some(offset),
+        total,
     })
 }
 
@@ -426,6 +427,7 @@ mod search_page_tests {
         )
         .unwrap();
         assert!(page.projects.is_empty());
+        assert_eq!(page.total, Some(3));
         query.offset = page.next_offset.unwrap();
         assert_eq!(query.offset, 2);
         let last = parse_search_page(
@@ -438,6 +440,7 @@ mod search_page_tests {
         .unwrap();
         assert_eq!(last.projects[0].id, "does-fit");
         assert_eq!(last.next_offset, None);
+        assert_eq!(last.total, Some(3));
         assert!(parse_search_page(&json!({}), &query).is_err());
     }
 }

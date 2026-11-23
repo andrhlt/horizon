@@ -258,9 +258,11 @@ impl Query {
 }
 
 /// A page can consume source hits that the launcher cannot turn into projects.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SearchPage {
     pub projects: Vec<Project>,
     pub next_offset: Option<usize>,
+    pub total: Option<usize>,
 }
 
 /// A place projects come from.
@@ -274,6 +276,7 @@ pub trait Source: Send + Sync {
         Ok(SearchPage {
             projects,
             next_offset,
+            total: None,
         })
     }
 

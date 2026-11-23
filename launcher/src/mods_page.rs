@@ -166,6 +166,8 @@ pub(super) struct Mods {
     results_list: cull::Cull,
     installed_list: cull::Cull,
     pub(super) report_list: cull::Cull,
+    pub(super) page: usize,
+    pub(super) total: Option<usize>,
     next_offset: Option<usize>,
     error: Option<String>,
     /// The failed search's own words are shown under its plain message.
@@ -300,6 +302,8 @@ impl Mods {
             results_list: cull::Cull::default(),
             installed_list: cull::Cull::default(),
             report_list: cull::Cull::default(),
+            page: 0,
+            total: None,
             next_offset: None,
             error: None,
             error_details: false,
@@ -433,6 +437,8 @@ impl Mods {
         self.searching = false;
         self.searched = false;
         self.error = None;
+        self.page = 0;
+        self.total = None;
         self.next_offset = None;
         self.results.clear();
         self.results_list.reset();
@@ -551,6 +557,113 @@ impl Mods {
 
     pub(super) fn needs_pack_review(&self, p: &Project) -> bool {
         reviews_resource_pack(p.kind, p.source, self.java.as_ref())
+    }
+
+    pub(super) fn pagination(&self) -> Option<Pagination> {
+        let pages = total_pages(self.total, PAGE);
+        let has_next = self.next_offset.is_some();
+        let show = self.page > 0 || has_next || pages.is_some_and(|n| n > 1);
+        if !show {
+            return None;
+        }
+        let can_prev = self.page > 0 && !self.searching;
+        let can_next = !self.searching && has_next && pages.is_none_or(|n| self.page + 1 < n);
+        let items = pages.map(|n| page_items(self.page, n)).unwrap_or_default();
+        let indicator = pagination_indicator(self.page, pages, self.total);
+        Some(Pagination {
+            page: self.page,
+            can_prev,
+            can_next,
+            items,
+            indicator,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PageItem {
+    /// 0-indexed page number.
+    Page(usize),
+    Ellipsis,
+}
+
+pub(super) struct Pagination {
+    pub(super) page: usize,
+    pub(super) can_prev: bool,
+    pub(super) can_next: bool,
+    pub(super) items: Vec<PageItem>,
+    pub(super) indicator: String,
+}
+
+/// Total number of pages for `total` items at `page_size` items per page.
+pub(super) fn total_pages(total: Option<usize>, page_size: usize) -> Option<usize> {
+    let total = total?;
+    if page_size == 0 {
+        return None;
+    }
+    Some(total.div_ceil(page_size).max(1))
+}
+
+/// Smart ellipsis page window for 0-indexed `current` out of `total_pages`.
+/// Produces at most 7 items (e.g. `1 … 4 [5] 6 … 12`) and never replaces a single page with `…`.
+pub(super) fn page_items(current: usize, total_pages: usize) -> Vec<PageItem> {
+    if total_pages == 0 {
+        return Vec::new();
+    }
+    if total_pages <= 7 {
+        return (0..total_pages).map(PageItem::Page).collect();
+    }
+    let current = current.min(total_pages - 1);
+    let last = total_pages - 1;
+    let mut out = Vec::with_capacity(7);
+    if current <= 2 {
+        out.extend([0, 1, 2, 3].into_iter().map(PageItem::Page));
+        out.push(PageItem::Ellipsis);
+        out.push(PageItem::Page(last));
+    } else if current >= total_pages - 3 {
+        out.push(PageItem::Page(0));
+        out.push(PageItem::Ellipsis);
+        out.extend((total_pages - 4..total_pages).map(PageItem::Page));
+    } else {
+        out.push(PageItem::Page(0));
+        if current == 3 {
+            out.push(PageItem::Page(1));
+        } else {
+            out.push(PageItem::Ellipsis);
+        }
+        out.push(PageItem::Page(current - 1));
+        out.push(PageItem::Page(current));
+        out.push(PageItem::Page(current + 1));
+        if current == total_pages - 4 {
+            out.push(PageItem::Page(total_pages - 2));
+        } else {
+            out.push(PageItem::Ellipsis);
+        }
+        out.push(PageItem::Page(last));
+    }
+    out
+}
+
+pub(super) fn pagination_indicator(
+    page: usize,
+    total_pages: Option<usize>,
+    total: Option<usize>,
+) -> String {
+    let current = (page + 1).to_string();
+    match (total_pages, total) {
+        (Some(pages), Some(total)) if total > 0 => trf(
+            "Page {page} of {pages} ({total})",
+            &[
+                ("page", &current),
+                ("pages", &pages.to_string()),
+                ("total", &total.to_string()),
+            ],
+        ),
+        (Some(pages), _) => trf(
+            "Page {page} of {pages}",
+            &[("page", &current), ("pages", &pages.to_string())],
+        ),
+        (None, _) => trf("Page {page}", &[("page", &current)]),
     }
 }
 
@@ -679,11 +792,10 @@ impl Launcher {
                         Ok(page) => {
                             let found = page.projects;
                             m.next_offset = page.next_offset;
-                            if offset == 0 {
-                                m.results.clear();
-                                m.results_list.reset();
-                            }
-                            m.results.extend(found.iter().cloned());
+                            m.total = page.total;
+                            m.page = offset / PAGE;
+                            m.results = found.clone();
+                            m.results_list.reset();
                             m.error = None;
                             next_page = m.next_default_page();
                             to_check.extend(found);
@@ -692,6 +804,7 @@ impl Launcher {
                             if offset == 0 {
                                 m.results.clear();
                                 m.next_offset = None;
+                                m.total = None;
                                 m.results_list.reset();
                             }
                             m.error = Some(e);
@@ -828,8 +941,10 @@ impl Launcher {
     pub(super) fn mods_search_keeping(&mut self, offset: usize, keep: bool) {
         if offset == 0 {
             let query = self.mods.new_query();
+            self.mods.page = 0;
             if !keep {
                 self.mods.results.clear();
+                self.mods.total = None;
                 self.mods.next_offset = None;
                 self.mods.results_list.reset();
             }
@@ -837,6 +952,20 @@ impl Launcher {
             self.mods.submitted = Some(query);
         }
         self.fetch_mods_page(offset);
+    }
+
+    /// Switches to 0-indexed `page`, replacing the current results and resetting the scroll to top.
+    pub(super) fn mods_go_page(&mut self, page: usize) {
+        self.mods.page = page;
+        self.mods.picked = None;
+        self.content_scroll
+            .handle
+            .set_offset(gpui::point(px(0.), px(0.)));
+        if self.mods.submitted.is_none() {
+            let query = self.mods.new_query();
+            self.mods.submitted = Some(query);
+        }
+        self.fetch_mods_page(page.saturating_mul(PAGE));
     }
 
     fn retry_mods_page(&mut self) {
@@ -2286,7 +2415,7 @@ impl Launcher {
                 tr("Nothing found that runs in Horizon. Show everything lists the rest.")
             };
             let out = div().flex().flex_col().child(centered(line, &t));
-            return self.mods_more(out, cx);
+            return self.mods_pagination(out, cx);
         }
         let result_count = shown.len();
         let rows = m.results_list.clone();
@@ -2396,7 +2525,7 @@ impl Launcher {
                     cx.notify();
                 }));
             index_row(
-                i + 1,
+                m.page * PAGE + i + 1,
                 name,
                 Some(detail.into_any_element()),
                 Some(right.into_any_element()),
@@ -2404,25 +2533,90 @@ impl Launcher {
             )
         };
         let list = rows.column(&scroll, result_count, 8., |_| false, row);
-        self.mods_more(div().flex().flex_col().child(list), cx)
+        self.mods_pagination(div().flex().flex_col().child(list), cx)
     }
 
-    /// The list's More, under `out` while the source has more pages.
-    fn mods_more(&self, mut out: Div, cx: &mut Context<Self>) -> Div {
+    /// Pagination controls under `out` when results span multiple pages.
+    fn mods_pagination(&self, mut out: Div, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        let m = &self.mods;
-        if let Some(offset) = m.next_offset {
-            let mut more = button("mods-more", "More", Kind::Ghost, &t);
-            if m.searching {
-                more = disabled(more);
-            } else {
-                more = more.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.mods_search(offset);
-                    cx.notify();
-                }));
-            }
-            out = out.child(div().flex().pt(px(16.)).child(more));
+        let Some(p) = self.mods.pagination() else {
+            return out;
+        };
+        let searching = self.mods.searching;
+        let current = p.page;
+
+        let mut prev = button("mods-page-prev", tr("Previous"), Kind::Ghost, &t);
+        if p.can_prev {
+            prev = prev.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.mods_go_page(current.saturating_sub(1));
+                cx.notify();
+            }));
+        } else {
+            prev = disabled(prev);
         }
+
+        let mut controls = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .child(prev);
+
+        for item in p.items {
+            match item {
+                PageItem::Ellipsis => {
+                    controls = controls
+                        .child(text(theme::LABEL).text_color(t.muted).px(px(4.)).child("…"));
+                }
+                PageItem::Page(target) => {
+                    let label = (target + 1).to_string();
+                    let id = SharedString::from(format!("mods-page-{target}"));
+                    if target == current {
+                        controls =
+                            controls.child(button(id, label, Kind::Secondary, &t).cursor_default());
+                    } else {
+                        let mut btn = button(id, label, Kind::Ghost, &t);
+                        if searching {
+                            btn = disabled(btn);
+                        } else {
+                            btn = btn.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.mods_go_page(target);
+                                cx.notify();
+                            }));
+                        }
+                        controls = controls.child(btn);
+                    }
+                }
+            }
+        }
+
+        let mut next = button("mods-page-next", tr("Next"), Kind::Ghost, &t);
+        if p.can_next {
+            next = next.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.mods_go_page(current + 1);
+                cx.notify();
+            }));
+        } else {
+            next = disabled(next);
+        }
+        controls = controls.child(next);
+
+        let indicator = text(theme::CAPTION)
+            .font_family(theme::MONO)
+            .text_color(t.muted)
+            .child(p.indicator);
+
+        out = out.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .pt(px(16.))
+                .child(controls)
+                .child(indicator),
+        );
         out
     }
 }
@@ -2882,5 +3076,46 @@ mod tests {
         };
         assert_eq!(shown(&results, false, support), [1, 3]);
         assert_eq!(shown(&results, true, support), [0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn pagination_windowing_and_totals() {
+        use PageItem::{Ellipsis as E, Page as P};
+
+        assert_eq!(total_pages(None, PAGE), None);
+        assert_eq!(total_pages(Some(0), PAGE), Some(1));
+        assert_eq!(total_pages(Some(20), PAGE), Some(1));
+        assert_eq!(total_pages(Some(21), PAGE), Some(2));
+        assert_eq!(total_pages(Some(234), PAGE), Some(12));
+
+        assert_eq!(page_items(0, 0), vec![]);
+        assert_eq!(page_items(0, 1), vec![P(0)]);
+        assert_eq!(
+            page_items(2, 7),
+            vec![P(0), P(1), P(2), P(3), P(4), P(5), P(6)]
+        );
+        // Near start (12 pages, 0-indexed 0..=11)
+        assert_eq!(page_items(0, 12), vec![P(0), P(1), P(2), P(3), E, P(11)]);
+        assert_eq!(page_items(2, 12), vec![P(0), P(1), P(2), P(3), E, P(11)]);
+        // Page 4 (index 3): no degenerate ellipsis for single page 2
+        assert_eq!(
+            page_items(3, 12),
+            vec![P(0), P(1), P(2), P(3), P(4), E, P(11)]
+        );
+        // Middle: `1 … 4 [5] 6 … 12` (0-indexed: `0 … 3 [4] 5 … 11`)
+        assert_eq!(page_items(4, 12), vec![P(0), E, P(3), P(4), P(5), E, P(11)]);
+        // Page 9 (index 8): no degenerate ellipsis for single page 11
+        assert_eq!(
+            page_items(8, 12),
+            vec![P(0), E, P(7), P(8), P(9), P(10), P(11)]
+        );
+        // Near end
+        assert_eq!(page_items(11, 12), vec![P(0), E, P(8), P(9), P(10), P(11)]);
+
+        assert_eq!(
+            pagination_indicator(0, Some(12), Some(234)),
+            "Page 1 of 12 (234)"
+        );
+        assert_eq!(pagination_indicator(2, None, None), "Page 3");
     }
 }

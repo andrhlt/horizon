@@ -1529,3 +1529,38 @@ fn an_old_native_path_that_is_not_a_file_is_left_alone() {
     assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
     fs::remove_dir_all(&home).unwrap();
 }
+
+#[test]
+fn search_page_reports_total_before_slicing() {
+    let mut index = sample();
+    let base = index.projects[0].clone();
+    index.projects = (0..5)
+        .map(|i| {
+            let mut p = base.clone();
+            p.id = format!("mod_{i}");
+            p.name = format!("Mod {i}");
+            p.downloads = (5 - i) as u64;
+            p
+        })
+        .collect();
+
+    let mut query = Query::new("", Kind::Mod);
+    query.limit = 2;
+
+    let p0 = search_page(&index, &query);
+    assert_eq!(p0.total, Some(5));
+    assert_eq!(p0.projects.len(), 2);
+    assert_eq!(p0.next_offset, Some(2));
+
+    query.offset = 2;
+    let p1 = search_page(&index, &query);
+    assert_eq!(p1.total, Some(5));
+    assert_eq!(p1.projects.len(), 2);
+    assert_eq!(p1.next_offset, Some(4));
+
+    query.offset = 4;
+    let p2 = search_page(&index, &query);
+    assert_eq!(p2.total, Some(5));
+    assert_eq!(p2.projects.len(), 1);
+    assert_eq!(p2.next_offset, None);
+}

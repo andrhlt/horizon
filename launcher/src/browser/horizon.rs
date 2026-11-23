@@ -5,7 +5,8 @@
 //! manifest), and files the index says were taken down are refused and turned off.
 use super::{
     details::{Details, GitHub, Link},
-    download, installed, java, FileRef, Kind, Project, Query, Source, SourceId, Version, GAME,
+    download, installed, java, FileRef, Kind, Project, Query, SearchPage, Source, SourceId,
+    Version, GAME,
 };
 use crate::i18n::{tr, trf};
 use horizon_platform::mod_package::index::{self, Index, Trust};
@@ -577,7 +578,7 @@ pub const SORTS: [super::details::Sort; 3] = [
 /// most downloaded first, or the newest (first published) or most recently updated (latest
 /// version) when the query asks, ties by downloads; those no version of which installs here are
 /// left out, or last with `everything`.
-fn search(index: &Index, query: &Query) -> Vec<Project> {
+fn search_page(index: &Index, query: &Query) -> SearchPage {
     use super::details::Sort;
     let mut found: Vec<&index::Project> = index
         .projects
@@ -622,11 +623,24 @@ fn search(index: &Index, query: &Query) -> Vec<Project> {
         .filter(|p| query.everything || p.blocked.is_none())
         .collect();
     found.sort_by_key(|p| p.blocked.is_some());
-    found
+    let total = found.len();
+    let projects: Vec<Project> = found
         .into_iter()
         .skip(query.offset)
         .take(query.limit)
-        .collect()
+        .collect();
+    let next = query.offset.saturating_add(projects.len());
+    let next_offset = (query.limit > 0 && next < total).then_some(next);
+    SearchPage {
+        projects,
+        next_offset,
+        total: Some(total),
+    }
+}
+
+#[cfg(test)]
+fn search(index: &index::Index, query: &Query) -> Vec<Project> {
+    search_page(index, query).projects
 }
 
 /// A project's screenshots as its page's gallery, in the index's order: those the registry
@@ -653,9 +667,13 @@ impl Source for Registry {
     }
 
     fn search(&self, query: &Query) -> Result<Vec<Project>, String> {
-        let found = search(&*index()?, query);
+        self.search_page(query).map(|page| page.projects)
+    }
+
+    fn search_page(&self, query: &Query) -> Result<SearchPage, String> {
+        let page = search_page(&*index()?, query);
         refresh_ratings();
-        Ok(found)
+        Ok(page)
     }
 
     fn project(&self, id: &str) -> Result<Project, String> {

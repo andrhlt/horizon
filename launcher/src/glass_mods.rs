@@ -32,7 +32,13 @@ impl Launcher {
             && m.error.is_none()
             && m.text.text().is_empty()
         {
-            // Results come in pages: only a last page gives the real count.
+            if let Some(total) = m.total {
+                return trf(
+                    "Search {count} Horizon mods",
+                    &[("count", &total.to_string())],
+                )
+                .into();
+            }
             if m.next_offset.is_some() {
                 return tr("Search Horizon mods").into();
             }
@@ -390,7 +396,7 @@ impl Launcher {
                 .px(px(16.))
                 .py(px(24.))
                 .child(line);
-            return self.glass_mods_more(div().flex().flex_col().child(line), cx);
+            return self.glass_mods_pagination(div().flex().flex_col().child(line), cx);
         }
         let picked = self.mods.picked_project().map(|p| p.id);
         // Registry pages add up behind More: only the rows near the view are built (`cull`).
@@ -532,27 +538,111 @@ impl Launcher {
             .flex()
             .flex_col()
             .child(rows.column(&scroll, total, 0., |_| false, row));
-        self.glass_mods_more(list, cx)
+        self.glass_mods_pagination(list, cx)
     }
 
-    /// The list's More, under `list` while the source has more pages.
-    fn glass_mods_more(&self, mut list: Div, cx: &mut Context<Self>) -> Div {
+    /// Pagination controls under `list` when results span multiple pages.
+    fn glass_mods_pagination(&self, mut list: Div, cx: &mut Context<Self>) -> Div {
         let t = self.theme;
-        if let Some(offset) = self.mods.next_offset {
-            let searching = self.mods.searching;
-            list = list.child(
-                div().flex().p(px(8.)).child(
-                    ui::quiet("mods-more", tr("More"), 36., &t)
-                        .when(searching, |d| d.opacity(0.5))
-                        .when(!searching, |d| {
-                            d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.mods_search(offset);
-                                cx.notify();
-                            }))
-                        }),
-                ),
-            );
+        let Some(p) = self.mods.pagination() else {
+            return list;
+        };
+        let searching = self.mods.searching;
+        let current = p.page;
+
+        let prev = ui::quiet("mods-page-prev", tr("Previous"), 32., &t)
+            .when(!p.can_prev, |d| d.opacity(0.4).cursor_default())
+            .when(p.can_prev, |d| {
+                d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.mods_go_page(current.saturating_sub(1));
+                    cx.notify();
+                }))
+            });
+
+        let mut controls = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(4.))
+            .child(prev);
+
+        for item in p.items {
+            match item {
+                PageItem::Ellipsis => {
+                    controls = controls.child(
+                        ui::text(13., FontWeight::NORMAL, 0.45)
+                            .px(px(6.))
+                            .child("…"),
+                    );
+                }
+                PageItem::Page(target) => {
+                    let label = (target + 1).to_string();
+                    let id = SharedString::from(format!("mods-page-{target}"));
+                    if target == current {
+                        controls = controls.child(
+                            div()
+                                .id(id)
+                                .flex()
+                                .flex_none()
+                                .items_center()
+                                .justify_center()
+                                .min_w(px(32.))
+                                .h(px(32.))
+                                .px(px(8.))
+                                .rounded(px(radius::CONTROL))
+                                .bg(ui::paper())
+                                .text_color(ui::on_paper())
+                                .font_family(horizon_theme::glass::FONT)
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(label),
+                        );
+                    } else {
+                        controls = controls.child(
+                            ui::quiet(id, label, 32., &t)
+                                .min_w(px(32.))
+                                .px(px(8.))
+                                .when(searching, |d| d.opacity(0.4).cursor_default())
+                                .when(!searching, |d| {
+                                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.mods_go_page(target);
+                                        cx.notify();
+                                    }))
+                                }),
+                        );
+                    }
+                }
+            }
         }
+
+        let next = ui::quiet("mods-page-next", tr("Next"), 32., &t)
+            .when(!p.can_next, |d| d.opacity(0.4).cursor_default())
+            .when(p.can_next, |d| {
+                d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.mods_go_page(current + 1);
+                    cx.notify();
+                }))
+            });
+        controls = controls.child(next);
+
+        let indicator = ui::text(12.5, FontWeight::NORMAL, 0.55)
+            .font_family(theme::MONO)
+            .child(p.indicator);
+
+        list = list.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap(px(12.))
+                .px(px(12.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(white(0.06))
+                .child(controls)
+                .child(indicator),
+        );
         list
     }
 

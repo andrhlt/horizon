@@ -3,7 +3,9 @@
 //! `HORIZON_CURSEFORGE_API_KEY` in the environment, else the same variable when the launcher was
 //! built (the release workflow passes the repository secret). Files carry SHA-1 and MD5; the
 //! download is checked against the SHA-1.
-use super::{modrinth::encode, FileRef, Kind, Project, Query, Source, SourceId, Version, GAME};
+use super::{
+    modrinth::encode, FileRef, Kind, Project, Query, SearchPage, Source, SourceId, Version, GAME,
+};
 use serde_json::Value;
 
 const API: &str = "https://api.curseforge.com/v1";
@@ -198,22 +200,38 @@ pub(super) fn parse_file(f: &Value) -> Option<Version> {
     })
 }
 
+fn parse_search_page(found: &Value, query: &Query) -> SearchPage {
+    let raw = found["data"].as_array();
+    let raw_len = raw.map_or(0, Vec::len);
+    let total = found["pagination"]["totalCount"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
+    let offset = query.offset + raw_len;
+    let more =
+        raw_len > 0 && raw_len == query.limit.clamp(1, 50) && total.is_none_or(|t| offset < t);
+    let projects = raw.into_iter().flatten().filter_map(parse_mod).collect();
+    SearchPage {
+        projects,
+        next_offset: more.then_some(offset),
+        total,
+    }
+}
+
 impl Source for CurseForge {
     fn id(&self) -> SourceId {
         SourceId::CurseForge
     }
 
     fn search(&self, query: &Query) -> Result<Vec<Project>, String> {
+        self.search_page(query).map(|page| page.projects)
+    }
+
+    fn search_page(&self, query: &Query) -> Result<SearchPage, String> {
         if query.kind == Kind::Shader {
             return Err(super::SHADERS_ON_HORIZON.into());
         }
         let found = self.get(&search_url(query))?;
-        Ok(found["data"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(parse_mod)
-            .collect())
+        Ok(parse_search_page(&found, query))
     }
 
     fn project(&self, id: &str) -> Result<Project, String> {
@@ -236,5 +254,44 @@ impl Source for CurseForge {
             .collect();
         all.sort_by(|a, b| b.published.cmp(&a.published));
         Ok(all)
+    }
+}
+
+#[cfg(test)]
+mod search_page_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parse_search_page_reads_pagination_total_and_next_offset() {
+        let mut query = Query::new("", Kind::Mod);
+        query.limit = 2;
+        let page = parse_search_page(
+            &json!({
+                "pagination": { "totalCount": 3 },
+                "data": [
+                    { "id": 1, "classId": 6, "slug": "a", "name": "A" },
+                    { "id": 2, "classId": 6, "slug": "b", "name": "B" }
+                ]
+            }),
+            &query,
+        );
+        assert_eq!(page.total, Some(3));
+        assert_eq!(page.projects.len(), 2);
+        assert_eq!(page.next_offset, Some(2));
+
+        query.offset = 2;
+        let last = parse_search_page(
+            &json!({
+                "pagination": { "totalCount": 3 },
+                "data": [
+                    { "id": 3, "classId": 6, "slug": "c", "name": "C" }
+                ]
+            }),
+            &query,
+        );
+        assert_eq!(last.total, Some(3));
+        assert_eq!(last.projects.len(), 1);
+        assert_eq!(last.next_offset, None);
     }
 }
