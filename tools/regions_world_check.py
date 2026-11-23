@@ -27,7 +27,8 @@ The report (`report.json` in --out) has every check's outcome and numbers: the t
 chunks, MSPT, the landing ticks and their reasons, the problems the log showed. The exit code is 1 when a check
 failed. A check that could not run (the world has no player in the End, say) fails, it is not skipped.
 
-`make-world` builds a stand-in world for a machine without the real one: a server on a fresh world, N bots spread
+`make-world` builds a stand-in world for a machine without the real one: a server on a fresh world, N bots (Seed0..,
+so that `check`'s own Bot0.. clones do not overwrite them) spread
 over a grid (so over many regions), a few of them sent to the End and the Nether, saved and stopped. It holds no
 real player's data.
 
@@ -392,13 +393,13 @@ def make_world(args):
     server = start_server(command, directory, out / 'make-world.log')
     try:
         server.console('gamerule respawn_radius 0')
-        bots, lines = start_bots(args, port, 'Bot', args.players, 'scatter', 600, out / 'make-world-bots.json', join_every=0.3)
+        bots, lines = start_bots(args, port, 'Seed', args.players, 'scatter', 600, out / 'make-world-bots.json', join_every=0.3)
         time.sleep(args.players * 0.3 + 150)
         end, nether = max(1, args.players // 14), max(1, args.players // 30)
         for i in range(args.players - end - nether, args.players - nether):
-            server.console(f'execute in minecraft:the_end run tp Bot{i} {(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}')
+            server.console(f'execute in minecraft:the_end run tp Seed{i} {(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}')
         for i in range(args.players - nether, args.players):
-            server.console(f'execute in minecraft:the_nether run tp Bot{i} {(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}')
+            server.console(f'execute in minecraft:the_nether run tp Seed{i} {(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}')
         time.sleep(40)
         server.console('save-all flush')
         time.sleep(20)
