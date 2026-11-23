@@ -78,18 +78,18 @@ fn meshing_threads(cores: usize) -> usize {
 /// terrain starts one sample job at most this often and no detail: it would
 /// otherwise take the cores the near chunks and the frame need.
 const HELD_SAMPLE_STEP: std::time::Duration = std::time::Duration::from_millis(500);
-/// A world entry's first near load holds far work on every machine, as on
-/// small ones ([`FirstLoad`]). It counts as that only when the near terrain
+/// A world entry's first near load limits far work to about one thread
+/// (`Lod::limited`, [`FirstLoad`]). It counts as that only when the near terrain
 /// starts loading this soon after far terrain is made: made later (switched on,
 /// or made again after a shader pack change), the near terrain is in already.
 const FIRST_LOAD_START: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long the near terrain must stay in before the first load counts as
 /// over: it can stop and start loading again from one frame to the next.
 const FIRST_LOAD_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
-/// The longest the first load holds far work: a player who keeps moving into
+/// The longest the first load limits far work: a player who keeps moving into
 /// new terrain keeps the near terrain loading for good.
 const FIRST_LOAD_MAX: std::time::Duration = std::time::Duration::from_secs(300);
-/// A world entry's first near load, while far terrain waits for it.
+/// A world entry's first near load, while far terrain keeps a small share.
 ///
 /// Measured on a 12-thread machine at render distance 128 and far terrain
 /// 256: with far terrain off, a new world's 52,653 near chunks were all in
@@ -99,7 +99,7 @@ const FIRST_LOAD_MAX: std::time::Duration = std::time::Duration::from_secs(300);
 /// workers are both 10 nice levels behind the process (`behind_server`), and
 /// the idle class, the only lower step, can't be left again by an
 /// unprivileged thread, so a machine that stays busy would starve far terrain
-/// for good. Holding the queues ends when the near terrain is in.
+/// for good. Limiting the queues ends when the near terrain is in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FirstLoad {
     /// Far terrain was made at this instant; the near terrain is not loading yet.
@@ -2129,8 +2129,10 @@ pub struct Lod {
     sample_jobs: usize,
     /// The near terrain is loading (`set_near_loading`).
     near_loading: bool,
-    /// The world entry's first near load holds far work (`held`).
+    /// The world entry's first near load limits far work (`limited`).
     first_load: FirstLoad,
+    /// While `limited`: a sample went last, so a dirty tile is meshed next.
+    mesh_turn: bool,
     /// When `request_samples` last started a job while held.
     held_sample_at: std::time::Instant,
     /// Tiles whose sampling failed, and when they may be asked again.
@@ -2552,6 +2554,7 @@ impl Lod {
             } else {
                 FirstLoad::Over
             },
+            mesh_turn: false,
             held_sample_at: std::time::Instant::now(),
             retry: FxHashMap::default(),
             ready: FxHashMap::default(),
@@ -3301,9 +3304,11 @@ impl Lod {
         if loading && !self.near_loading {
             // The queue filled while nothing loaded nearby; the near chunks
             // must not wait behind it. Larger machines keep its first
-            // `SAMPLE_JOBS`, small ones and a first load none.
-            let mut keep = if self.small || self.first_load.holding() {
+            // `SAMPLE_JOBS`, small ones none, a first load (`limited`) one.
+            let mut keep = if self.small {
                 0
+            } else if self.limited() {
+                1
             } else {
                 SAMPLE_JOBS
             };
@@ -3346,15 +3351,26 @@ impl Lod {
             self.shared.mesh_wake.notify_all();
         }
     }
-    /// Far work waits for the near terrain: one sample job at a time
-    /// (`HELD_SAMPLE_STEP`), no meshing and no detail. On small machines
-    /// whenever it loads; on every machine through a world entry's first load
-    /// (`FirstLoad`).
+    /// On small machines, far work waits while the near terrain loads: one
+    /// sample job at a time (`HELD_SAMPLE_STEP`), no meshing and no detail.
     fn held(&self) -> bool {
-        (self.small && self.near_loading) || self.first_load.holding()
+        self.small && self.near_loading
+    }
+    /// Through a world entry's first near load (`FirstLoad`), on machines
+    /// with more than four threads (small ones keep `held`), far terrain keeps
+    /// about one thread: one far job in flight at a time, a sample or a mesh,
+    /// taking turns (`mesh_turn`), the nearest first, and no detail (no far
+    /// decoration).
+    fn limited(&self) -> bool {
+        !self.small && self.first_load.holding()
+    }
+    /// Far jobs queued or running: samples and meshes.
+    fn far_jobs_in_flight(&self) -> usize {
+        self.pending.len() + self.outstanding_meshes
     }
     fn request_detail(&mut self, camera: [i32; 2]) {
         if self.held()
+            || self.limited()
             || self.detail_request_pending
             // Nothing new while summaries wait: a chunk whose detail is still
             // in the backlog has its mask clear, so it would be asked for
@@ -3981,7 +3997,15 @@ impl Lod {
         if self.outstanding_meshes >= self.mesh_workers * 4 {
             return;
         }
-        let keys: Vec<(TileKey, u64)> = self
+        let limited = self.limited();
+        if limited {
+            if self.far_jobs_in_flight() > 0 {
+                return;
+            }
+            // A sample goes next unless this mesh is dispatched.
+            self.mesh_turn = false;
+        }
+        let mut keys: Vec<(TileKey, u64)> = self
             .dirty
             .iter()
             .filter(|(key, _)| self.active.contains(key) && self.ready.contains_key(key))
@@ -3990,6 +4014,16 @@ impl Lod {
         if keys.is_empty() {
             self.dirty.clear();
             return;
+        }
+        if limited {
+            // The nearest tile alone, whatever its level, so the ring grows
+            // outward from the near terrain; the rest stay dirty.
+            let first = keys
+                .iter()
+                .copied()
+                .min_by_key(|(key, _)| (key.distance(camera), key.level, *key))
+                .expect("checked above");
+            keys = vec![first];
         }
         #[cfg(debug_assertions)]
         self.check_mesh_samples();
@@ -4036,7 +4070,16 @@ impl Lod {
             };
             queued.extend(batch);
         }
-        self.dirty.clear();
+        if limited {
+            let (active, ready) = (&self.active, &self.ready);
+            self.dirty
+                .retain(|key, _| active.contains(key) && ready.contains_key(key));
+            for (key, _) in &cancels {
+                self.dirty.remove(key);
+            }
+        } else {
+            self.dirty.clear();
+        }
         for (key, canceled) in cancels {
             self.mesh_cancel.insert(key, canceled);
         }
@@ -4094,6 +4137,11 @@ impl Lod {
         let free = if self.held() {
             usize::from(
                 self.pending.is_empty() && self.held_sample_at.elapsed() >= HELD_SAMPLE_STEP,
+            )
+        } else if self.limited() {
+            // One far job at a time; a sampled tile is meshed before the next.
+            usize::from(
+                self.far_jobs_in_flight() == 0 && !(self.mesh_turn && !self.dirty.is_empty()),
             )
         } else {
             // `SAMPLE_JOBS` while the near terrain loads, the full queue
@@ -4161,6 +4209,7 @@ impl Lod {
         }
         drop(jobs);
         if issued > 0 {
+            self.mesh_turn = self.limited();
             self.shared.wake.notify_all();
         }
     }
@@ -6282,11 +6331,11 @@ mod tests {
         assert_eq!(lod.mesh_samples.get(&key).unwrap().spans(0)[0].max, 80);
     }
 
-    /// A world entry's first near load holds far work on any machine until
-    /// the near terrain has stayed in for `FIRST_LOAD_SETTLE`; later loads
-    /// don't, nor a load that starts long after far terrain was made.
+    /// A world entry's first near load lasts until the near terrain has
+    /// stayed in for `FIRST_LOAD_SETTLE`; later loads don't count, nor a load
+    /// that starts long after far terrain was made.
     #[test]
-    fn the_first_near_load_holds_far_work_until_it_settles() {
+    fn the_first_near_load_lasts_until_it_settles() {
         let t0 = std::time::Instant::now();
         let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
         let steps = |states: &[(bool, u64)]| {
@@ -6326,55 +6375,79 @@ mod tests {
         assert!(steps(&[(true, 0), (true, max - 1)]).holding());
         assert_eq!(steps(&[(true, 0), (true, max)]), FirstLoad::Over);
     }
+    /// Through the first load a larger machine meshes one far tile at a
+    /// time, the nearest first whatever its level, and none while a sample
+    /// is in flight; once the load is over, every dirty tile goes at once.
     #[test]
-    fn far_meshing_holds_through_the_first_load_on_a_large_machine() {
+    fn the_first_load_meshes_one_far_tile_at_a_time_nearest_first() {
         let mut lod = Lod::scheduler_for_test();
-        let key = TileKey {
-            x: 0,
+        let fine = |x| TileKey { x, z: 0, level: 0 };
+        // 64 blocks away, 144 away, and a coarse tile 256 away that the
+        // screen-space priority (`MeshQueued::priority`) would put first.
+        let (near, far) = (fine(4), fine(9));
+        let coarse = TileKey {
+            x: 2,
             z: 0,
-            level: 0,
+            level: 3,
         };
+        for key in [near, far, coarse] {
+            lod.active.insert(key);
+            lod.ready.insert(key, TileColumns::empty());
+            lod.sync_sample(key);
+            lod.mark_mesh(key);
+        }
         lod.small = false;
         lod.first_load = FirstLoad::Waiting(std::time::Instant::now());
-        lod.active.insert(key);
-        lod.ready.insert(key, TileColumns::empty());
-        lod.sync_sample(key);
-        lod.mark_mesh(key);
         lod.set_near_loading(true);
+        assert!(lod.limited() && !lod.held());
+        let take = |lod: &mut Lod| -> Vec<TileKey> {
+            let mut jobs = lod.shared.mesh_jobs.lock().unwrap();
+            let keys = jobs.drain().map(|queued| queued.job.key).collect();
+            drop(jobs);
+            lod.outstanding_meshes = 0;
+            keys
+        };
         lod.dispatch_meshes([0, 0]);
-        assert!(lod.shared.mesh_jobs.lock().unwrap().is_empty());
-        // Still held right after the near terrain is in: it may resume.
-        lod.set_near_loading(false);
         lod.dispatch_meshes([0, 0]);
-        assert!(lod.shared.mesh_jobs.lock().unwrap().is_empty());
+        assert_eq!(take(&mut lod), [near], "one at a time, the nearest");
+        lod.pending.insert(fine(30));
+        lod.dispatch_meshes([0, 0]);
+        assert!(take(&mut lod).is_empty(), "a sample is in flight");
+        lod.pending.clear();
+        lod.dispatch_meshes([0, 0]);
+        assert_eq!(take(&mut lod), [far]);
 
-        // Once the first load is over, a later one holds nothing here.
+        // Over: the rest at once.
         lod.first_load = FirstLoad::Over;
         lod.set_near_loading(true);
         lod.dispatch_meshes([0, 0]);
-        assert_eq!(lod.shared.mesh_jobs.lock().unwrap().len(), 1);
+        assert_eq!(take(&mut lod), [coarse]);
     }
 
+    /// Small machines hold far meshing while the near terrain loads, and
+    /// only then, first load or not.
     #[test]
     fn far_meshing_holds_while_small_machine_near_terrain_loads() {
         let mut lod = Lod::scheduler_for_test();
-        let key = TileKey {
-            x: 0,
-            z: 0,
-            level: 0,
-        };
+        let keys = [0, 1].map(|x| TileKey { x, z: 0, level: 0 });
         lod.small = true;
-        lod.active.insert(key);
-        lod.ready.insert(key, TileColumns::empty());
-        lod.sync_sample(key);
-        lod.mark_mesh(key);
+        lod.first_load = FirstLoad::Waiting(std::time::Instant::now());
+        for key in keys {
+            lod.active.insert(key);
+            lod.ready.insert(key, TileColumns::empty());
+            lod.sync_sample(key);
+            lod.mark_mesh(key);
+        }
         lod.set_near_loading(true);
+        assert!(lod.held() && !lod.limited());
         lod.dispatch_meshes([0, 0]);
         assert!(lod.shared.mesh_jobs.lock().unwrap().is_empty());
 
+        // The first load is still settling, but a small machine isn't limited.
         lod.set_near_loading(false);
+        assert!(lod.first_load.holding() && !lod.limited());
         lod.dispatch_meshes([0, 0]);
-        assert_eq!(lod.shared.mesh_jobs.lock().unwrap().len(), 1);
+        assert_eq!(lod.shared.mesh_jobs.lock().unwrap().len(), 2);
     }
 
     #[test]
