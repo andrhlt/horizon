@@ -369,9 +369,12 @@ fn options() -> Result<Options, String> {
             "--far-after" => o.far_after = value.parse().map_err(|_| number("seconds"))?,
             "--far-dump" => o.far_dump = Some(value),
             "--run" => {
-                let (tick, command) = value.split_once(':').ok_or_else(|| number("TICK:COMMAND"))?;
+                let (tick, command) = value
+                    .split_once(':')
+                    .ok_or_else(|| number("TICK:COMMAND"))?;
                 let tick = tick.parse().map_err(|_| number("TICK:COMMAND"))?;
-                o.run.push((tick, command.trim_start_matches('/').to_owned()));
+                o.run
+                    .push((tick, command.trim_start_matches('/').to_owned()));
             }
             "--give" => {
                 for part in value.split(',') {
@@ -1647,8 +1650,10 @@ fn run_bot(
                 z: pos[2],
                 // Fight bots stand on the ground (but in a --crits jump); the others fly.
                 flags: u8::from(
-                    (matches!(behaviour, Behaviour::Fight | Behaviour::Stand | Behaviour::Roam)
-                        && !crits.airborne())
+                    (matches!(
+                        behaviour,
+                        Behaviour::Fight | Behaviour::Stand | Behaviour::Roam
+                    ) && !crits.airborne())
                         || o.ground,
                 ),
             })
