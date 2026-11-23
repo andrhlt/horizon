@@ -21,7 +21,7 @@ horizon-perf-share = { path = "../horizon-perf-share" }
 
 [lib]
 # Only `rlib` by default so native builds do not overwrite an unhashed cdylib across feature sets;
-# `cargo xtask perf-wasm` requests `cdylib` explicitly via `cargo rustc -- --crate-type cdylib`.
+# `cargo xtask perf-wasm` requests `cdylib` explicitly via `cargo rustc --crate-type cdylib`.
 crate-type = ["rlib"]
 
 [features]

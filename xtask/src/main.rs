@@ -153,7 +153,6 @@ fn perf_wasm() -> Result<(), String> {
             "wasm",
             "--target",
             "wasm32-unknown-unknown",
-            "--",
             "--crate-type",
             "cdylib",
         ])
