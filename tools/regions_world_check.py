@@ -393,7 +393,8 @@ def make_world(args):
     server = start_server(command, directory, out / 'make-world.log')
     try:
         server.console('gamerule respawn_radius 0')
-        bots, lines = start_bots(args, port, 'Seed', args.players, 'scatter', 600, out / 'make-world-bots.json', join_every=0.3)
+        bots, lines = start_bots(args, port, 'Seed', args.players, 'scatter', args.players * 0.3 + args.settle + 300, out / 'make-world-bots.json',
+                                join_every=0.3)
         time.sleep(args.players * 0.3 + args.settle)
         end, nether = max(1, args.players // 14), max(1, args.players // 30)
         moves = [(i, END, f'{(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}') for i in range(args.players - end - nether, args.players - nether)]
