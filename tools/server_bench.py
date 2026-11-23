@@ -947,7 +947,7 @@ def main():
         'commit': subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip(),
         'java': subprocess.run(['java', '--version'], capture_output=True, text=True).stdout.splitlines()[:1],
         'versions': versions(args.servers.split(',')),
-        'settings': {**{k: v for k, v in vars(args).items() if k != 'pumpkin_files'}, 'out': str(args.out),
+        'settings': {**{k: v for k, v in vars(args).items() if k != 'pumpkin_files'}, 'out': str(args.out), 'world': str(args.world) if args.world else None,
                      'pumpkin': str(args.pumpkin) if args.pumpkin else None,
                      'capture': str(args.capture) if args.capture else None, 'properties': PROPERTIES},
         'runs': runs,
