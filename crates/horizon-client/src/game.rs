@@ -4065,8 +4065,7 @@ impl Game<'_> {
             self.pending
                 .record_from(&self.world, pos, entity, &facts.name);
         } else if let Some(tag) = spill::saved_entity(&self.world, pos) {
-            let prototypes = self.items().component_defaults.clone();
-            self.pending.record_saved(pos, &tag, &prototypes);
+            self.pending.record_saved(pos, &tag);
         }
         let hive = match self.world.block_entities.get(&key) {
             Some(BlockEntity::Beehive(h)) => self.hive_state(pos).map(|s| ((**h).clone(), s)),
