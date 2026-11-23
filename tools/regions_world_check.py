@@ -27,7 +27,8 @@ The report (`report.json` in --out) has every check's outcome and numbers: the t
 chunks, MSPT, the landing ticks and their reasons, the problems the log showed. The exit code is 1 when a check
 failed. A check that could not run (the world has no player in the End, say) fails, it is not skipped.
 
-`make-world` builds a stand-in world for a machine without the real one: a server on a fresh world, N bots spread
+`make-world` builds a stand-in world for a machine without the real one: a server on a fresh world, N bots (Seed0..,
+so that `check`'s own Bot0.. clones do not overwrite them) spread
 over a grid (so over many regions), a few of them sent to the End and the Nether, saved and stopped. It holds no
 real player's data.
 
@@ -145,6 +146,8 @@ def read_console(server, command, pattern, timeout=10):
         for line in server.since(start):
             if m := pattern.search(line):
                 return m
+            if 'No entity was found' in line:
+                return None
         time.sleep(0.2)
     return None
 
@@ -392,17 +395,29 @@ def make_world(args):
     server = start_server(command, directory, out / 'make-world.log')
     try:
         server.console('gamerule respawn_radius 0')
-        bots, lines = start_bots(args, port, 'Bot', args.players, 'scatter', 600, out / 'make-world-bots.json', join_every=0.3)
-        time.sleep(args.players * 0.3 + 150)
+        bots, lines = start_bots(args, port, 'Seed', args.players, 'scatter', args.players * 0.3 + args.settle + 300, out / 'make-world-bots.json',
+                                join_every=0.3)
+        time.sleep(args.players * 0.3 + args.settle)
         end, nether = max(1, args.players // 14), max(1, args.players // 30)
-        for i in range(args.players - end - nether, args.players - nether):
-            server.console(f'execute in minecraft:the_end run tp Bot{i} {(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}')
-        for i in range(args.players - nether, args.players):
-            server.console(f'execute in minecraft:the_nether run tp Bot{i} {(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}')
-        time.sleep(40)
+        moves = [(i, END, f'{(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}') for i in range(args.players - end - nether, args.players - nether)]
+        moves += [(i, NETHER, f'{(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}') for i in range(args.players - nether, args.players)]
+        # A console teleport can miss (a chunk not ready, a pull-back): send it again until the player is there.
+        for attempt in range(5):
+            pending = []
+            for i, dim, at in moves:
+                got = where(server, f'Seed{i}')
+                if not got or got[0] != dim:
+                    pending.append((i, dim, at))
+            if not pending:
+                break
+            for i, dim, at in pending:
+                server.console(f'execute in {dim} run tp Seed{i} {at}')
+            time.sleep(15)
+        # The bots leave before the save: a player is saved where the server has them, in their own level.
+        stop_bots(bots)
+        time.sleep(5)
         server.console('save-all flush')
         time.sleep(20)
-        stop_bots(bots)
     finally:
         server.stop()
     world = directory / 'world'
@@ -431,6 +446,9 @@ def main():
     m = sub.add_parser('make-world', parents=[common])
     m.add_argument('--players', type=int, default=100)
     m.add_argument('--world-out', type=Path, default=None)
+    m.add_argument('--settle', type=int, default=600,
+                   help='seconds the bots stand in their cells before the save, so the server generates and saves '
+                        'the chunks round them (a world a bench loads from disk, not generates)')
     args = parser.parse_args()
     return check(args) if args.command == 'check' else make_world(args)
 

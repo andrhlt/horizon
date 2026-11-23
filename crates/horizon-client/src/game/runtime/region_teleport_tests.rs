@@ -651,15 +651,13 @@ fn lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_
         leaked.is_empty(),
         "passes outstanding with every region at rest (set HORIZON_TRACE_PASSES=1 for where): {leaked:?}"
     );
-    // What a save and a stop ask first.
-    let mut all_home = true;
-    for set in game.regions.resident.values_mut() {
-        for slot in &mut set.games {
-            all_home &= slot.home(None).unwrap_or(false);
-        }
-    }
-    assert!(all_home);
-    Game::admit_entity_save().expect("a save is admitted once every region is at rest");
+    // A stop: every region comes home, and then the save is admitted and written.
+    game.land_residents();
+    assert_eq!(passes_outstanding(), 0, "{:?}", pass_sites());
+    Game::admit_entity_save().expect("a save is admitted once every region is home");
+    game.save_game().expect("the save after the regions came home");
+    game.tick_server(false)
+        .expect("a tick after the regions came home and the save");
 }
 
 /// A component's debug text with its strings spelled out (`JavaString([104, 105])` is `"hi"`).

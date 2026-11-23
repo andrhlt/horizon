@@ -369,9 +369,12 @@ fn options() -> Result<Options, String> {
             "--far-after" => o.far_after = value.parse().map_err(|_| number("seconds"))?,
             "--far-dump" => o.far_dump = Some(value),
             "--run" => {
-                let (tick, command) = value.split_once(':').ok_or_else(|| number("TICK:COMMAND"))?;
+                let (tick, command) = value
+                    .split_once(':')
+                    .ok_or_else(|| number("TICK:COMMAND"))?;
                 let tick = tick.parse().map_err(|_| number("TICK:COMMAND"))?;
-                o.run.push((tick, command.trim_start_matches('/').to_owned()));
+                o.run
+                    .push((tick, command.trim_start_matches('/').to_owned()));
             }
             "--give" => {
                 for part in value.split(',') {
@@ -1173,6 +1176,11 @@ fn read(
                 }
                 Ok(())
             }
+            cb::RESPAWN => {
+                // A new level (or a respawn): vanilla's client drops its chunks and the server sends them again.
+                lock(&bot.held).clear();
+                Ok(())
+            }
             cb::SET_HEALTH => {
                 if let Ok(play::Clientbound::SetHealth(p)) = play::Clientbound::decode(id, &body) {
                     *lock(&bot.health) = Some(p.health);
@@ -1380,8 +1388,12 @@ fn run_bot(
         // A teleport from the server wins over where the bot thought it was.
         if let Some(at) = lock(&bot.teleport).take() {
             // A roam bot walks about wherever it was put last (a respawn is far from where it died).
-            if behaviour == Behaviour::Roam && distance(at, pos) > 32.0 {
-                home = at;
+            // A roam bot that was pulled back (a wall in its way) picks another goal: the same one would
+            // push it into the same wall every tick.
+            if behaviour == Behaviour::Roam {
+                if distance(at, pos) > 32.0 {
+                    home = at;
+                }
                 target = at;
             }
             pos = at;
@@ -1643,8 +1655,10 @@ fn run_bot(
                 z: pos[2],
                 // Fight bots stand on the ground (but in a --crits jump); the others fly.
                 flags: u8::from(
-                    (matches!(behaviour, Behaviour::Fight | Behaviour::Stand | Behaviour::Roam)
-                        && !crits.airborne())
+                    (matches!(
+                        behaviour,
+                        Behaviour::Fight | Behaviour::Stand | Behaviour::Roam
+                    ) && !crits.airborne())
                         || o.ground,
                 ),
             })
@@ -1683,6 +1697,7 @@ fn behaviour_of(mode: &str, index: usize) -> Behaviour {
         "walk" => Behaviour::Walk,
         "explore" => Behaviour::Explore,
         "scatter" => Behaviour::Scatter,
+        "roam" => Behaviour::Roam,
         "fight" => Behaviour::Fight,
         "flood-move" => Behaviour::FloodMove,
         "flood-acks" => Behaviour::FloodAcks,
@@ -2027,6 +2042,32 @@ mod tests {
         assert_eq!(watched.respawns.load(Ordering::Relaxed), 1);
         server.writer.shutdown();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn every_listed_behaviour_has_its_own_name() {
+        for name in [
+            "idle",
+            "stand",
+            "roam",
+            "hotbar",
+            "walk",
+            "explore",
+            "scatter",
+            "fight",
+            "flood-move",
+            "flood-acks",
+            "flood-packets",
+            "flood-chunks",
+            "flood-use",
+            "flood-click",
+            "flood-suggest",
+            "flood-book",
+            "flood-sign",
+            "flood-recipe",
+        ] {
+            assert_eq!(behaviour_of(name, 0).name(), name, "--behaviour {name}");
+        }
     }
 
     fn feed(entities: &mut Entities, packet: &Clientbound) {

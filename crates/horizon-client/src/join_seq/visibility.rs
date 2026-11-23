@@ -45,12 +45,22 @@ impl PassLease {
     #[track_caller]
     pub fn enter() -> Self {
         PASSES.fetch_add(1, Ordering::Relaxed);
+        // Read here: inside a closure `Location::caller()` is the closure's own place, not the caller's.
+        let caller = std::panic::Location::caller();
         Self(tracing().then(|| {
             let id = NEXT_SITE.fetch_add(1, Ordering::Relaxed);
+            // The frames of horizon's own code only, innermost first: who took the pass, a few calls up.
+            let trace = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = trace
+                .lines()
+                .filter(|l| l.contains("horizon_client") && !l.contains("visibility"))
+                .take(6)
+                .map(str::trim)
+                .collect();
             let site = format!(
-                "{} on {}",
-                std::panic::Location::caller(),
-                std::thread::current().name().unwrap_or("an unnamed thread")
+                "{caller} on {} via {}",
+                std::thread::current().name().unwrap_or("an unnamed thread"),
+                frames.join(" < ")
             );
             if let Ok(mut sites) = SITES.lock() {
                 sites.insert(id, site);

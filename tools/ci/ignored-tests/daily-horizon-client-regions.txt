@@ -5,6 +5,7 @@ horizon-client game::regions::tests::a_region_absorbed_by_another_hands_over_its
 horizon-client game::regions::tests::a_player_teleported_onto_another_regions_ground_is_handed_to_that_region_by_a_task lib daily resources
 horizon-client game::regions::tests::a_region_asks_the_region_of_a_player_for_their_place_and_gets_it_a_tick_later lib daily resources
 horizon-client game::region_teleport_tests::players_in_separate_regions_teleport_to_each_other_within_a_level_and_across_levels lib daily resources
+horizon-client game::region_teleport_tests::lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_pass_lifted lib daily resources
 # The global tick: a region's /weather and /gamerule reach the level and every region; a level-wide spawn goes to one region.
 horizon-client game::regions::tests::a_regions_time_weather_and_rules_are_the_global_ticks_and_its_changes_reach_every_region lib daily resources
 horizon-client game::regions::tests::a_level_wide_spawn_is_granted_to_one_region_and_run_there_once lib daily resources
