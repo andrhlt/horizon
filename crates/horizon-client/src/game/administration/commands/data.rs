@@ -226,7 +226,9 @@ impl Game<'_> {
             Target::Orb(id) => {
                 let uuid = self.uuid_for(id);
                 let tag = entity_nbt::orb_to_nbt(self.orbs.iter().find(|o| o.id == id)?, uuid);
-                crate::game::persist::with_raw(tag, self.persist.raw.get(&id))
+                let mut tag = crate::game::persist::with_raw(tag, self.persist.raw.get(&id));
+                self.save_portal_cooldown(id, &mut tag);
+                tag
             }
             Target::Projectile(id) => {
                 let uuid = self.uuid_for(id);
@@ -444,6 +446,31 @@ impl Game<'_> {
         // passengers the load kept raw (none, when it kept none).
         if let Tag::Compound(c) = &mut tag {
             c.remove(&"Passengers".into());
+            // Tags is a list of strings: the elements that are not strings fail to
+            // decode, the others stay. CustomName is a text: another type drops it.
+            let kept_tags = match c.get(&"Tags".into()) {
+                Some(Tag::List(l)) => Some(
+                    l.iter()
+                        .filter(|e| matches!(e, Tag::String(_)))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ),
+                Some(_) => Some(Vec::new()),
+                None => None,
+            };
+            if let Some(kept) = kept_tags {
+                if kept.is_empty() {
+                    c.remove(&"Tags".into());
+                } else {
+                    c.insert("Tags".into(), Tag::List(kept));
+                }
+            }
+            let bad_name = c.get(&"CustomName".into()).is_some_and(|t| {
+                !matches!(t, Tag::String(_) | Tag::Compound(_) | Tag::List(_))
+            });
+            if bad_name {
+                c.remove(&"CustomName".into());
+            }
         }
         match t {
             // EntityDataAccessor.setData: players can't be modified, guests neither.
@@ -766,10 +793,10 @@ impl Game<'_> {
                 // Entity.load reads portalCooldown and leaves the portal
                 // process as it is.
                 if let Some(portal) = self.portals.entities.get_mut(&id) {
-                    portal.cooldown = match tag.get("PortalCooldown") {
-                        Some(Tag::Int(cooldown)) => *cooldown,
-                        _ => 0,
-                    };
+                    portal.cooldown = tag
+                        .get("PortalCooldown")
+                        .and_then(horizon_client::nbt_path::int_value)
+                        .unwrap_or(0);
                 } else {
                     self.restore_portal_cooldown(id, &tag);
                 }
@@ -863,6 +890,16 @@ impl Game<'_> {
                         a.read_spectral_duration(&tag);
                     }
                 });
+                // Entity.load reads portalCooldown and leaves the portal
+                // process as it is; the read path writes the live value back.
+                if let Some(portal) = self.portals.entities.get_mut(&id) {
+                    portal.cooldown = tag
+                        .get("PortalCooldown")
+                        .and_then(horizon_client::nbt_path::int_value)
+                        .unwrap_or(0);
+                } else {
+                    self.restore_portal_cooldown(id, &tag);
+                }
                 set_key(&mut tag, "UUID", Tag::IntArray(uuid.to_vec()));
             }
             _ => return Err(stale()),
