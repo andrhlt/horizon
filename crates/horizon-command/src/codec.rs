@@ -290,9 +290,12 @@ pub fn decode(registry: &str, t: &Tag, reg: &Registries) -> Result<(), String> {
                 predicate_fields(id, map, t, reg)
             })
         }
-        "minecraft:item_modifier" => element_or_list(t, &|x| {
-            dispatch(x, reg, "minecraft:loot_function_type", &|_, _, _| Ok(()))
-        }),
+        "minecraft:item_modifier" => {
+            element_or_list(t, &|x| {
+                dispatch(x, reg, "minecraft:loot_function_type", &|_, _, _| Ok(()))
+            })?;
+            validate_modifier_stack_sizes(t, reg)
+        }
         "minecraft:slot_source" => slot_sources::decode(t, reg),
         // Dialog types: CommonDialogData's title, then each type's own.
         "minecraft:dialog" => dispatch(t, reg, "minecraft:dialog_type", &|id, map, t| {
@@ -321,6 +324,47 @@ pub fn decode(registry: &str, t: &Tag, reg: &Registries) -> Result<(), String> {
         },
         _ => Ok(()),
     }
+}
+
+/// Validate MAX_STACK_SIZE from the original NbtOps value before the
+/// modifier can change any slots, including when it is part of a sequence.
+fn validate_modifier_stack_sizes(tag: &Tag, reg: &Registries) -> Result<(), String> {
+    if let Tag::List(list) = tag {
+        return list
+            .iter()
+            .try_for_each(|child| validate_modifier_stack_sizes(child, reg));
+    }
+    let ty = tag.get("type").and_then(as_string);
+    match ty
+        .as_deref()
+        .map(|id| id.strip_prefix("minecraft:").unwrap_or(id))
+    {
+        Some("set_components") => {
+            if let Some(components) = tag.get("components") {
+                for key in ["minecraft:max_stack_size", "max_stack_size"] {
+                    if let Some(value) = components.get(key) {
+                        super::item::decode_component("minecraft:max_stack_size", value, reg)
+                            .map_err(|e| format!("{e} missed input: {}", snbt(components)))?;
+                    }
+                }
+            }
+        }
+        Some("sequence") => {
+            if let Some(functions @ Tag::List(_)) = tag.get("functions") {
+                validate_modifier_stack_sizes(functions, reg)?;
+            }
+        }
+        Some("filtered") => {
+            for child in ["on_pass", "on_fail"]
+                .into_iter()
+                .filter_map(|key| tag.get(key))
+            {
+                validate_modifier_stack_sizes(child, reg)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// A partial check of `LootTable.DIRECT_CODEC`: only the holders of its
@@ -466,6 +510,40 @@ fn parse_resource_or_id(reader: &mut Reader, lookup: Option<(&Registries, &str)>
 #[cfg(test)]
 mod predicate_tests {
     use super::*;
+
+    #[test]
+    fn inline_set_components_decodes_typed_stack_size_in_range() {
+        let reg = Registries::default();
+        let decode_modifier = |text: &str| {
+            let (tag, _) = horizon_core::nbt::parse_snbt(text).unwrap();
+            decode("minecraft:item_modifier", &tag, &reg)
+        };
+        for size in ["1b", "16b", "99"] {
+            assert!(
+                decode_modifier(&format!(
+                    r#"{{type:"set_components",components:{{max_stack_size:{size}}}}}"#
+                ))
+                .is_ok()
+            );
+        }
+        for size in [0, 100] {
+            let modifier = format!(
+                r#"{{type:"minecraft:set_components",components:{{"minecraft:max_stack_size":{size}}}}}"#
+            );
+            assert_eq!(
+                decode_modifier(&modifier),
+                Err(format!(
+                    r#"Value must be within range [1;99]: {size} missed input: {{"minecraft:max_stack_size":{size}}}"#
+                ))
+            );
+            assert!(
+                decode_modifier(&format!(
+                    r#"{{type:"minecraft:sequence",functions:[{modifier}]}}"#
+                ))
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn inline_constant_combinators_require_decodable_children() {

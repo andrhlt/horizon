@@ -5,9 +5,9 @@ def cases(cmd, setup):
     target = 'entity @s weapon.mainhand'
     selected = '/data get entity @s SelectedItem'
 
-    def modify(patch):
+    def modify(patch, expect_result=1):
         return cmd(f'/item modify {target} {{type:"minecraft:set_components",components:{patch}}}',
-                   expect_result=1)
+                   expect_result=expect_result)
 
     return [
         *setup('/clear @s'),
@@ -22,6 +22,26 @@ def cases(cmd, setup):
         cmd(f'/item replace {target} with minecraft:compass[custom_data={{kept:1}}] 64'),
         modify('{"minecraft:max_stack_size":16,"minecraft:rarity":"rare"}'),
         cmd(f'{selected}.count', expect_result=64),
+        cmd(f'{selected}.components', expect_result=1),
+        cmd(f'/item replace {target} with minecraft:compass 8'),
+        modify('{"minecraft:max_stack_size":16b}'),
+        cmd(f'{selected}.components."minecraft:max_stack_size"', expect_result=16),
+        modify('{"minecraft:max_stack_size":100}', expect_result=None),
+        cmd(f'{selected}.components."minecraft:max_stack_size"', expect_result=16),
+        cmd(f'/item modify {target} {{type:"minecraft:sequence",functions:['
+            '{type:"minecraft:set_components",components:{max_stack_size:24b}}]}',
+            expect_result=1),
+        cmd(f'{selected}.components."minecraft:max_stack_size"', expect_result=24),
+        cmd(f'/item replace {target} with minecraft:chest[custom_data={{kept:1}}]'),
+        modify('{"minecraft:container":[{slot:0,item:{id:"ender_pearl",count:17}}]}'),
+        cmd(f'{selected}.components', expect_result=1),
+        cmd(f'/item replace {target} with minecraft:bundle[custom_data={{kept:1}}]'),
+        modify('{"minecraft:bundle_contents":[{id:"ender_pearl",count:17}]}'),
+        cmd(f'{selected}.components', expect_result=1),
+        cmd(f'/item replace {target} with minecraft:bush[custom_data={{kept:1}}]'),
+        modify('{"minecraft:use_effects":{can_sprint:true}}'),
+        cmd(f'{selected}.components', expect_result=2),
+        modify('{"minecraft:use_effects":{can_sprint:false}}'),
         cmd(f'{selected}.components', expect_result=1),
         *setup('/clear @s'),
     ]

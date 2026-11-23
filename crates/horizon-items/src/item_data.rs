@@ -785,10 +785,9 @@ impl ItemStack {
         if data.is_some_and(|d| d.other("!minecraft:max_stack_size").is_some()) {
             return Some(1);
         }
-        match data.and_then(|d| d.other("minecraft:max_stack_size")) {
-            Some(Tag::Int(n)) => Some((*n).clamp(1, 99) as u32),
-            _ => None,
-        }
+        data.and_then(|d| d.other("minecraft:max_stack_size"))
+            .and_then(crate::properties::component_int)
+            .map(|size| size.clamp(1, 99) as u32)
     }
     /// `ItemInstance.getMaxStackSize`: the stack's own `max_stack_size`, else
     /// the item's. A removed component is vanilla's `getOrDefault` default of
@@ -1359,10 +1358,12 @@ pub fn all_bricks(sides: &[Option<ItemStack>; 4]) -> bool {
     })
 }
 fn template_from(tag: &Tag) -> Option<ItemStack> {
+    use horizon_world::datafix::dynamic::namespaced;
+
     match tag {
-        Tag::String(id) => Some(ItemStack::new(&id.to_string_lossy(), 1)),
+        Tag::String(id) => Some(ItemStack::new(&namespaced(&id.to_string_lossy()), 1)),
         _ => {
-            let id = tag.get("id").and_then(string)?;
+            let id = namespaced(&tag.get("id").and_then(string)?);
             // `ItemStackTemplate.CODEC`: `count` is `ExtraCodecs.intRange(1, 99)`, so a
             // template outside it does not decode.
             let count = tag.get("count").and_then(int).unwrap_or(1);
@@ -2264,7 +2265,12 @@ pub fn apply_components_and_validate(
         if keep_patch_entry(&key, &value, prototype) {
             // The stack stores the decoded `Codec.INT` value for its size limit.
             let value = if id == "minecraft:max_stack_size" {
-                crate::properties::component_int(&value).map_or(value, Tag::Int)
+                let Some(size) =
+                    crate::properties::component_int(&value).filter(|size| (1..=99).contains(size))
+                else {
+                    return;
+                };
+                Tag::Int(size)
             } else {
                 value
             };
@@ -2315,8 +2321,8 @@ fn validate_strict(stack: &ItemStack, items: &crate::items::Items) -> bool {
 /// The scalar number components decode with `Codec.INT` / `Codec.FLOAT`
 /// (`Number.intValue`, `floatValue`): a loaded prototype keeps JSON's
 /// narrowest tag (`250` is a short) and `250.5f` decodes to 250. The break
-/// sound's registry reference accepts the default namespace. Other components
-/// compare NBT exactly, including raw NBT inside contained item patches.
+/// sound's registry reference accepts the default namespace and `use_effects`
+/// compares decoded fields. Other components compare NBT exactly.
 pub fn same_component_value(key: &str, a: &Tag, b: &Tag) -> bool {
     let int = |tag: &Tag| match tag {
         Tag::Byte(v) => Some(i32::from(*v)),
@@ -2347,6 +2353,10 @@ pub fn same_component_value(key: &str, a: &Tag, b: &Tag) -> bool {
             matches!((float(a), float(b)), (Some(a), Some(b)) if a == b)
         }
         "minecraft:break_sound" => a == b || component_values::identifier_equal(Some(a), Some(b)),
+        "minecraft:use_effects" => matches!(
+            (ingredient_components::use_effects(a), ingredient_components::use_effects(b)),
+            (Ok(a), Ok(b)) if a == b
+        ),
         _ => a == b,
     }
 }
@@ -2457,6 +2467,27 @@ mod tests {
                 r#"{"!minecraft:use_effects":{}}"#,
             ),
             (
+                bush,
+                1,
+                r#"{"minecraft:custom_data":{kept:1},"minecraft:use_effects":{can_sprint:true}}"#,
+                r#"{"minecraft:use_effects":{can_sprint:false}}"#,
+                r#"{"minecraft:custom_data":{kept:1}}"#,
+            ),
+            (
+                compass,
+                8,
+                "{}",
+                r#"{"minecraft:max_stack_size":16b}"#,
+                r#"{"minecraft:max_stack_size":16}"#,
+            ),
+            (
+                compass,
+                8,
+                r#"{"minecraft:max_stack_size":16}"#,
+                r#"{"minecraft:max_stack_size":100}"#,
+                r#"{"minecraft:max_stack_size":16}"#,
+            ),
+            (
                 compass,
                 64,
                 r#"{"minecraft:custom_data":{kept:1}}"#,
@@ -2499,6 +2530,54 @@ mod tests {
             apply_components_and_validate(&mut stack, patch(&snbt), &items);
             assert_eq!(encode_components(&stack), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn set_components_validates_unqualified_item_templates() {
+        let root =
+            std::env::temp_dir().join(format!("h20490-item-templates-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("data/minecraft/loot_table")).unwrap();
+        std::fs::write(
+            root.join("items.json"),
+            r#"{"minecraft:ender_pearl":{"minecraft:max_stack_size":16}}"#,
+        )
+        .unwrap();
+        let items = crate::items::Items::catalog(
+            &root,
+            &horizon_world::loot::PackOverlay::NONE,
+            &horizon_world::item_defaults::read(&root).unwrap(),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        for (item, invalid) in [
+            (
+                "minecraft:chest",
+                r#"{"minecraft:container":[{slot:0,item:{id:"ender_pearl",count:17}}]}"#,
+            ),
+            (
+                "minecraft:bundle",
+                r#"{"minecraft:bundle_contents":[{id:"ender_pearl",count:17}]}"#,
+            ),
+        ] {
+            let mut stack = ItemStack::new(item, 1);
+            apply_components_and_validate(&mut stack, patch(invalid), &items);
+            assert_eq!(encode_components(&stack), None, "{item}");
+        }
+        let mut bundle = ItemStack::new("minecraft:bundle", 1);
+        apply_components_and_validate(
+            &mut bundle,
+            patch(r#"{"minecraft:bundle_contents":[{id:"ender_pearl",count:3},"ender_pearl"]}"#),
+            &items,
+        );
+        let pearls = &bundle.data().unwrap().bundle_contents;
+        assert_eq!(pearls.len(), 2);
+        assert!(
+            pearls
+                .iter()
+                .all(|pearl| &*pearl.item == "minecraft:ender_pearl")
+        );
+        let contents = crate::bundle::Contents::from_items(&items, pearls.clone());
+        assert_eq!(contents.weight_fraction(), 0.25);
     }
 
     /// `PatchedDataComponentMap.applyPatch`: values equal to the loaded prototype (whose
