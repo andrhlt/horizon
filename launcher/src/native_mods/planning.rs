@@ -20,24 +20,50 @@ pub(super) fn classify(
 ) -> Result<Routes, Failed> {
     let found = scan_bundles(folder)?;
     let mut result = Routes::default();
-    let mut projects = Vec::new();
+    let mut parsed = Vec::new();
     for bundle in &found {
         let route = match api::Project::read(bundle) {
             Ok(project) => {
-                let route = prebuilt::project_refusal(&project).map_or(Route::Prebuilt, |reason| {
-                    Route::Invalid {
-                        reason: reason.plain(),
-                    }
-                });
-                projects.push(project);
+                parsed.push(Some(project));
+                let route = Route::Prebuilt;
                 route
             }
             Err(error) => Route::Invalid {
                 reason: error.to_string(),
             },
         };
+        if parsed.len() < result.mods.len() + 1 {
+            parsed.push(None);
+        }
         result.mods.push((bundle.manifest.id.clone(), route));
     }
+    let library_packages: std::collections::BTreeSet<String> = parsed
+        .iter()
+        .filter_map(Option::as_ref)
+        .flat_map(|project: &api::Project<'_>| project.dependency_tables())
+        .flat_map(|(_, dependencies)| dependencies.iter())
+        .filter_map(|(key, value)| {
+            value.get("path").map(|_| {
+                value
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key)
+                    .to_owned()
+            })
+        })
+        .collect();
+    for (index, project) in parsed.iter().enumerate() {
+        let Some(project) = project else { continue };
+        if let Some(reason) = prebuilt::project_refusal_with_library_features(
+            project,
+            library_packages.contains(&project.package),
+        ) {
+            result.mods[index].1 = Route::Invalid {
+                reason: reason.plain(),
+            };
+        }
+    }
+    let projects: Vec<_> = parsed.into_iter().flatten().collect();
     if projects.is_empty() {
         return Ok(result);
     }

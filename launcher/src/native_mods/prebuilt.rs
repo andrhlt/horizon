@@ -76,6 +76,16 @@ pub(super) fn refusal(projects: &[api::Project<'_>]) -> Option<Refusal> {
 
 /// Why `project` alone can't build against the prebuilt game, or `None` when it can.
 pub(super) fn project_refusal(project: &api::Project<'_>) -> Option<Refusal> {
+    project_refusal_with_library_features(project, false)
+}
+
+/// A path dependency which is itself staged as a native package is a library input, not a
+/// top-level mod. Its Cargo feature table describes the library API selected by its parent; the
+/// parent still remains subject to the prebuilt route's feature and build-script restrictions.
+pub(super) fn project_refusal_with_library_features(
+    project: &api::Project<'_>,
+    allow_library_features: bool,
+) -> Option<Refusal> {
     {
         let mod_id = || project.bundle.manifest.id.clone();
         let cargo = &project.cargo;
@@ -91,10 +101,11 @@ pub(super) fn project_refusal(project: &api::Project<'_>) -> Option<Refusal> {
         if has_script {
             return Some(Refusal::BuildScript { mod_id: mod_id() });
         }
-        if cargo
-            .get("features")
-            .and_then(toml::Value::as_table)
-            .is_some_and(|t| !t.is_empty())
+        if !allow_library_features
+            && cargo
+                .get("features")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|t| !t.is_empty())
         {
             return Some(Refusal::Features { mod_id: mod_id() });
         }
@@ -1482,6 +1493,13 @@ mod tests {
 
     /// What [`refusal`] says of one mod whose Cargo.toml is `cargo`.
     fn refusal_of(cargo: &str) -> Option<Refusal> {
+        refusal_of_with_library_features(cargo, false)
+    }
+
+    fn refusal_of_with_library_features(
+        cargo: &str,
+        allow_library_features: bool,
+    ) -> Option<Refusal> {
         let name = std::thread::current().name().unwrap().replace(':', "-");
         let dir = super::super::tests::dir(&name);
         super::super::tests::write_bundle(&dir, "example", "");
@@ -1491,7 +1509,34 @@ mod tests {
         )
         .unwrap();
         let bundle = super::super::bundle_in(&dir).unwrap().unwrap();
-        refusal(&[api::Project::read(&bundle).unwrap()])
+        project_refusal_with_library_features(
+            &api::Project::read(&bundle).unwrap(),
+            allow_library_features,
+        )
+    }
+
+    #[test]
+    fn a_staged_path_library_may_declare_its_own_features() {
+        assert_eq!(
+            refusal_of_with_library_features("[features]\ndim3=[]", true),
+            None
+        );
+        assert_eq!(
+            refusal_of_with_library_features("[features]\ndim3=[]", false),
+            Some(Refusal::Features {
+                mod_id: "example".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_staged_path_library_still_cannot_run_build_scripts() {
+        assert_eq!(
+            refusal_of_with_library_features("build='build.rs'", true),
+            Some(Refusal::BuildScript {
+                mod_id: "example".into()
+            })
+        );
     }
 
     #[test]
