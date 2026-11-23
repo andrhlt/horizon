@@ -294,7 +294,7 @@ pub fn decode(registry: &str, t: &Tag, reg: &Registries) -> Result<(), String> {
             element_or_list(t, &|x| {
                 dispatch(x, reg, "minecraft:loot_function_type", &|_, _, _| Ok(()))
             })?;
-            validate_modifier_stack_sizes(t)
+            validate_modifier_patches(t)
         }
         "minecraft:slot_source" => slot_sources::decode(t, reg),
         // Dialog types: CommonDialogData's title, then each type's own.
@@ -326,11 +326,11 @@ pub fn decode(registry: &str, t: &Tag, reg: &Registries) -> Result<(), String> {
     }
 }
 
-/// Validate MAX_STACK_SIZE from the original NbtOps value before the
-/// modifier can change any slots, including when it is part of a sequence.
-fn validate_modifier_stack_sizes(tag: &Tag) -> Result<(), String> {
+/// Check inline component patches before the modifier can change any slots,
+/// including when it is part of a sequence.
+fn validate_modifier_patches(tag: &Tag) -> Result<(), String> {
     if let Tag::List(list) = tag {
-        return list.iter().try_for_each(validate_modifier_stack_sizes);
+        return list.iter().try_for_each(validate_modifier_patches);
     }
     let ty = tag.get("type").and_then(as_string);
     match ty
@@ -339,12 +339,12 @@ fn validate_modifier_stack_sizes(tag: &Tag) -> Result<(), String> {
     {
         Some("set_components") => {
             if let Some(Tag::Compound(patch)) = tag.get("components") {
-                horizon_items::item_data::component_values::decode_modifier_patch(patch)?;
+                horizon_items::item_data::component_values::validate_modifier_patch(patch)?;
             }
         }
         Some("sequence") => {
             if let Some(functions @ Tag::List(_)) = tag.get("functions") {
-                validate_modifier_stack_sizes(functions)?;
+                validate_modifier_patches(functions)?;
             }
         }
         Some("filtered") => {
@@ -352,7 +352,7 @@ fn validate_modifier_stack_sizes(tag: &Tag) -> Result<(), String> {
                 .into_iter()
                 .filter_map(|key| tag.get(key))
             {
-                validate_modifier_stack_sizes(child)?;
+                validate_modifier_patches(child)?;
             }
         }
         _ => {}
@@ -564,6 +564,23 @@ mod predicate_tests {
             assert_eq!(
                 decode("minecraft:item_modifier", &tag, &reg).is_ok(),
                 size == 99
+            );
+        }
+    }
+
+    #[test]
+    fn inline_set_components_rejects_transient_map_post_processing() {
+        let reg = Registries::default();
+        for patch in [
+            r#"{map_post_processing:"lock"}"#,
+            r#"{"!minecraft:map_post_processing":{}}"#,
+        ] {
+            let command = format!(r#"{{type:"set_components",components:{patch}}}"#);
+            let (tag, _) = horizon_core::nbt::parse_snbt(&command).unwrap();
+            let error = "'minecraft:map_post_processing' is not a persistent component";
+            assert_eq!(
+                decode("minecraft:item_modifier", &tag, &reg),
+                Err(format!("{error}; {error} missed input: {patch}")),
             );
         }
     }

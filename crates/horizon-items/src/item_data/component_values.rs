@@ -12,48 +12,64 @@ pub fn max_stack_size(value: &Tag) -> Result<i32, String> {
     Ok(size)
 }
 
-/// The component keys and stack-size values in a modifier's `DataComponentPatch`,
-/// including patches inside stack templates. Walk only component payloads that
-/// hold items so opaque data such as `custom_data` keeps its original keys.
-pub fn decode_modifier_patch(patch: &Compound) -> Result<Compound, String> {
+/// Check the persistent `DataComponentPatch.CODEC` used by inline modifiers.
+pub fn validate_modifier_patch(patch: &Compound) -> Result<(), String> {
+    decode_patch(patch, true).map(drop)
+}
+
+/// Normalize a live component patch, including patches inside stack templates.
+pub(super) fn decode_live_patch(patch: &Compound) -> Result<Compound, String> {
+    decode_patch(patch, false)
+}
+
+fn decode_patch(patch: &Compound, persistent: bool) -> Result<Compound, String> {
     use horizon_world::datafix::dynamic::namespaced;
 
+    let decode_item = |item: &Tag| decode_item_template(item, persistent);
     patch
         .iter()
         .map(|(key, value)| {
             let text = key.to_string_lossy();
-            if let Some(id) = text.strip_prefix('!') {
-                return Ok((
-                    format!("!{}", namespaced(id)).as_str().into(),
-                    value.clone(),
-                ));
-            }
-            let id = namespaced(&text);
+            let removed = text.strip_prefix('!');
+            let id = namespaced(removed.unwrap_or(&text));
             let decoded = match id.as_str() {
+                "minecraft:map_post_processing" if persistent => {
+                    let error = format!("'{id}' is not a persistent component");
+                    // The dispatched map decodes the key for both the entry and its value codec.
+                    Err(format!("{error}; {error}"))
+                }
+                _ if removed.is_some() => Ok(value.clone()),
                 "minecraft:max_stack_size" => max_stack_size(value).map(Tag::Int),
                 "minecraft:container" => map_items(value, |slot| {
                     map_fields(slot, |key, field| {
                         if key == &JavaString::from("item") {
-                            decode_item_template(field)
+                            decode_item(field)
                         } else {
                             Ok(field.clone())
                         }
                     })
                 }),
                 "minecraft:bundle_contents" | "minecraft:charged_projectiles" => {
-                    map_items(value, decode_item_template)
+                    map_items(value, decode_item)
                 }
-                "minecraft:use_remainder" => decode_item_template(value),
+                "minecraft:use_remainder" => decode_item(value),
                 "minecraft:pot_decorations" => {
                     map_fields(value, |key, field| match key.to_string_lossy().as_str() {
-                        "back" | "left" | "right" | "front" => decode_item_template(field),
+                        "back" | "left" | "right" | "front" => decode_item(field),
                         _ => Ok(field.clone()),
                     })
                 }
                 _ => Ok(value.clone()),
             };
             decoded
-                .map(|value| (id.as_str().into(), value))
+                .map(|value| {
+                    let id = if removed.is_some() {
+                        format!("!{id}")
+                    } else {
+                        id
+                    };
+                    (id.as_str().into(), value)
+                })
                 .map_err(|error| {
                     let missed = Tag::compound([(key.clone(), value.clone())]);
                     format!(
@@ -65,12 +81,12 @@ pub fn decode_modifier_patch(patch: &Compound) -> Result<Compound, String> {
         .collect()
 }
 
-fn decode_item_template(value: &Tag) -> Result<Tag, String> {
+fn decode_item_template(value: &Tag, persistent: bool) -> Result<Tag, String> {
     map_fields(value, |key, value| {
         if key == &JavaString::from("components")
             && let Tag::Compound(patch) = value
         {
-            decode_modifier_patch(patch).map(Tag::Compound)
+            decode_patch(patch, persistent).map(Tag::Compound)
         } else {
             Ok(value.clone())
         }

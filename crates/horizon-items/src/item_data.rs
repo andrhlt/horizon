@@ -2248,7 +2248,7 @@ pub fn apply_components_and_validate(
     patch: &horizon_core::nbt::Compound,
     items: &crate::items::Items,
 ) {
-    let Ok(patch) = component_values::decode_modifier_patch(patch) else {
+    let Ok(patch) = component_values::decode_live_patch(patch) else {
         return;
     };
     let prototype = items.component_defaults.get(&*stack.item);
@@ -2258,6 +2258,9 @@ pub fn apply_components_and_validate(
     };
     let replaces_bundle = patch.contains_key(&JavaString::from("minecraft:bundle_contents"))
         || patch.contains_key(&JavaString::from("!minecraft:bundle_contents"));
+    let replaces_post_processing = patch
+        .contains_key(&JavaString::from("minecraft:map_post_processing"))
+        || patch.contains_key(&JavaString::from("!minecraft:map_post_processing"));
     for (key, value) in patch {
         let id = key.to_string_lossy();
         let opposite = match id.strip_prefix('!') {
@@ -2280,7 +2283,9 @@ pub fn apply_components_and_validate(
         extra,
     };
     if let Some(old) = stack.data() {
-        if let Some(post_processing) = old.map_post_processing {
+        if let Some(post_processing) = old.map_post_processing
+            && !replaces_post_processing
+        {
             candidate.data_mut().map_post_processing = Some(post_processing);
         }
         if old.bundle_selected.0 != BundleSelected::default().0 && !replaces_bundle {
@@ -2299,6 +2304,8 @@ fn validate_strict(stack: &ItemStack, items: &crate::items::Items) -> bool {
     stack.count <= max
         && (max <= 1 || !stack.carries_component(items.get(&stack.item), "minecraft:max_damage"))
         && stack.data().is_none_or(|data| {
+            // Vanilla checks the counts of the immediate templates here.
+            // ItemStackTemplate.create validates children when the template becomes a stack.
             data.container
                 .iter()
                 .map(|(_, stack)| stack)
@@ -2507,6 +2514,21 @@ mod tests {
     }
 
     #[test]
+    fn set_components_keeps_or_replaces_live_map_post_processing() {
+        let items = crate::items::Items::empty();
+        let mut map = ItemStack::new("minecraft:filled_map", 1);
+        map.data_mut().map_post_processing = Some(1);
+        for (change, expected) in [
+            (r#"{custom_data:{kept:1}}"#, Some(1)),
+            (r#"{map_post_processing:"lock"}"#, Some(0)),
+            (r#"{"!map_post_processing":{}}"#, None),
+        ] {
+            apply_components_and_validate(&mut map, &patch(change), &items);
+            assert_eq!(map.data().and_then(|d| d.map_post_processing), expected);
+        }
+    }
+
+    #[test]
     fn set_components_rejects_invalid_durability_or_contained_counts() {
         let items = crate::items::Items::empty();
         let mut stack = ItemStack::new("minecraft:compass", 1);
@@ -2522,6 +2544,23 @@ mod tests {
             apply_components_and_validate(&mut stack, &patch(&snbt), &items);
             assert_eq!(encode_components(&stack), None, "{invalid}");
         }
+    }
+
+    #[test]
+    fn set_components_keeps_overstacked_grandchild_templates() {
+        let items = crate::items::Items::empty();
+        let mut bundle = ItemStack::new("minecraft:bundle", 1);
+        let change = patch(
+            r#"{bundle_contents:[{id:"chest",components:{container:[{slot:0,item:{
+            id:"compass",count:2,components:{max_stack_size:1}
+        }}]}}]}"#,
+        );
+        apply_components_and_validate(&mut bundle, &change, &items);
+        let chest = &bundle.data().unwrap().bundle_contents[0];
+        let compass = &chest.data().unwrap().container[0].1;
+        assert_eq!(&*compass.item, "minecraft:compass");
+        assert_eq!(compass.count, 2);
+        assert_eq!(compass.own_max_stack_size(), Some(1));
     }
 
     #[test]

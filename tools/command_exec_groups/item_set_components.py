@@ -46,6 +46,16 @@ def cases(cmd, setup):
         modify('{bundle_contents:[{id:"compass",components:{max_stack_size:1b}}]}'),
         cmd(f'{selected}.components."minecraft:bundle_contents"[0].components."minecraft:max_stack_size"',
             expect_result=1),
+        # validateStrict checks the chest template's count. The compass is
+        # checked when the chest template is materialized as a live stack.
+        modify('{bundle_contents:[{id:"chest",components:{container:[{slot:0,item:'
+               '{id:"compass",count:2,components:{max_stack_size:1}}}]}}]}'),
+        cmd(f'{selected}.components."minecraft:bundle_contents"[0].components'
+            '."minecraft:container"[0].item.count', expect_result=2),
+        cmd(f'/item replace {target} with minecraft:filled_map[custom_data={{kept:1}}]'),
+        modify('{map_post_processing:"lock"}', expect_result=None),
+        modify('{"!minecraft:map_post_processing":{}}', expect_result=None),
+        cmd(f'{selected}.components', expect_result=1),
         cmd(f'/item replace {target} with minecraft:bush[custom_data={{kept:1}}]'),
         modify('{"minecraft:use_effects":{can_sprint:true}}'),
         cmd(f'{selected}.components', expect_result=2),
