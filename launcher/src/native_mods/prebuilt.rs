@@ -71,7 +71,23 @@ impl Refusal {
 
 /// The first structural reason these projects cannot use the prebuilt game.
 pub(super) fn refusal(projects: &[api::Project<'_>]) -> Option<Refusal> {
-    projects.iter().find_map(project_refusal)
+    let library_packages: std::collections::BTreeSet<String> = projects
+        .iter()
+        .flat_map(|project| project.dependency_tables())
+        .flat_map(|(_, dependencies)| dependencies.iter())
+        .filter_map(|(key, value)| {
+            value.get("path").map(|_| {
+                value
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key)
+                    .to_owned()
+            })
+        })
+        .collect();
+    projects.iter().find_map(|project| {
+        project_refusal_with_library_features(project, library_packages.contains(&project.package))
+    })
 }
 
 /// Why `project` alone can't build against the prebuilt game, or `None` when it can.
