@@ -2208,15 +2208,7 @@ pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nb
         return;
     };
     let before = patch.len();
-    patch.retain(|key, value| {
-        // A removal is kept only where the prototype has the component.
-        if let Some(removed) = key.to_string_lossy().strip_prefix('!') {
-            return prototype.contains_key(&JavaString::from(removed));
-        }
-        prototype
-            .get(key)
-            .is_none_or(|default| !same_component_value(&key.to_string_lossy(), value, default))
-    });
+    patch.retain(|key, value| keep_patch_entry(key, value, Some(prototype)));
     if patch.len() == before {
         return;
     }
@@ -2234,12 +2226,97 @@ pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nb
     }
 }
 
+fn keep_patch_entry(
+    key: &JavaString,
+    value: &Tag,
+    prototype: Option<&horizon_core::nbt::Compound>,
+) -> bool {
+    let id = key.to_string_lossy();
+    if let Some(removed) = id.strip_prefix('!') {
+        return prototype.is_some_and(|p| p.contains_key(&JavaString::from(removed)));
+    }
+    prototype
+        .and_then(|p| p.get(key))
+        .is_none_or(|default| !same_component_value(&id, value, default))
+}
+
+/// `ItemStack.applyComponentsAndValidate`: commit a patch only when the
+/// resulting components and the original count pass `validateStrict`.
+pub fn apply_components_and_validate(
+    stack: &mut ItemStack,
+    patch: horizon_core::nbt::Compound,
+    items: &crate::items::Items,
+) {
+    let prototype = items.component_defaults.get(&*stack.item);
+    let mut merged = match components_tag(stack.damage, stack.data()) {
+        Some(Tag::Compound(components)) => components,
+        _ => Default::default(),
+    };
+    let replaces_bundle = patch.contains_key(&JavaString::from("minecraft:bundle_contents"))
+        || patch.contains_key(&JavaString::from("!minecraft:bundle_contents"));
+    for (key, value) in patch {
+        let id = key.to_string_lossy();
+        let opposite = match id.strip_prefix('!') {
+            Some(id) => JavaString::from(id),
+            None => JavaString::from(format!("!{id}").as_str()),
+        };
+        merged.remove(&opposite);
+        if keep_patch_entry(&key, &value, prototype) {
+            // The stack stores the decoded `Codec.INT` value for its size limit.
+            let value = if id == "minecraft:max_stack_size" {
+                crate::properties::component_int(&value).map_or(value, Tag::Int)
+            } else {
+                value
+            };
+            merged.insert(key, value);
+        } else {
+            merged.remove(&key);
+        }
+    }
+    let tag = Tag::Compound(merged);
+    let (damage, extra) = decode_components_for_item(&stack.item, Some(&tag));
+    let mut candidate = ItemStack {
+        item: stack.item.clone(),
+        count: stack.count,
+        damage,
+        extra,
+    };
+    if let Some(old) = stack.data() {
+        if let Some(post_processing) = old.map_post_processing {
+            candidate.data_mut().map_post_processing = Some(post_processing);
+        }
+        if old.bundle_selected.0 != BundleSelected::default().0 && !replaces_bundle {
+            candidate.data_mut().bundle_selected = old.bundle_selected;
+        }
+    }
+    if validate_strict(&candidate, items) {
+        *stack = candidate;
+    }
+}
+
+/// `ItemStack.validateStrict`: check the effective size, durability and
+/// contained stacks before accepting an edited stack.
+fn validate_strict(stack: &ItemStack, items: &crate::items::Items) -> bool {
+    let max = stack.max_stack_size(items);
+    stack.count <= max
+        && (max <= 1 || !stack.carries_component(items.get(&stack.item), "minecraft:max_damage"))
+        && stack.data().is_none_or(|data| {
+            data.container
+                .iter()
+                .map(|(_, stack)| stack)
+                .chain(&data.bundle_contents)
+                .chain(&data.charged)
+                .all(|stack| stack.count <= stack.max_stack_size(items))
+                && crate::bundle::valid_contents_weight(items, &data.bundle_contents)
+        })
+}
+
 /// Whether two values of component `key` are equal as its codec reads them.
 /// The scalar number components decode with `Codec.INT` / `Codec.FLOAT`
 /// (`Number.intValue`, `floatValue`): a loaded prototype keeps JSON's
-/// narrowest tag (`250` is a short) and `250.5f` decodes to 250. Every other
-/// component compares its NBT exactly, so raw NBT keeps its tag types, also
-/// inside the item patches a container or bundle carries.
+/// narrowest tag (`250` is a short) and `250.5f` decodes to 250. The break
+/// sound's registry reference accepts the default namespace. Other components
+/// compare NBT exactly, including raw NBT inside contained item patches.
 pub fn same_component_value(key: &str, a: &Tag, b: &Tag) -> bool {
     let int = |tag: &Tag| match tag {
         Tag::Byte(v) => Some(i32::from(*v)),
@@ -2269,6 +2346,7 @@ pub fn same_component_value(key: &str, a: &Tag, b: &Tag) -> bool {
         "minecraft:minimum_attack_charge" => {
             matches!((float(a), float(b)), (Some(a), Some(b)) if a == b)
         }
+        "minecraft:break_sound" => a == b || component_values::identifier_equal(Some(a), Some(b)),
         _ => a == b,
     }
 }
@@ -2349,6 +2427,79 @@ pub fn command_components(text: &str) -> Result<Tag, String> {
 mod tests {
     use super::*;
     use crate::banner_layer::BannerLayer;
+
+    #[test]
+    fn set_components_applies_prototype_rules_before_accepting_the_patch() {
+        let stairs = "minecraft:mud_brick_stairs";
+        let bush = "minecraft:bush";
+        let compass = "minecraft:compass";
+        let mut items = crate::items::Items::empty();
+        items.component_defaults = Arc::new(std::collections::HashMap::from([
+            (
+                stairs.to_owned(),
+                patch(r#"{"minecraft:break_sound":"minecraft:entity.item.break"}"#),
+            ),
+            (bush.to_owned(), patch(r#"{"minecraft:use_effects":{}}"#)),
+        ]));
+        for (item, count, before, change, after) in [
+            (
+                stairs,
+                1,
+                r#"{"minecraft:break_sound":"minecraft:block.stone.break","minecraft:custom_data":{kept:1}}"#,
+                r#"{"minecraft:break_sound":"entity.item.break"}"#,
+                r#"{"minecraft:custom_data":{kept:1}}"#,
+            ),
+            (
+                bush,
+                1,
+                r#"{"minecraft:custom_data":{temporary:1}}"#,
+                r#"{"!minecraft:use_effects":{},"!minecraft:custom_data":{}}"#,
+                r#"{"!minecraft:use_effects":{}}"#,
+            ),
+            (
+                compass,
+                64,
+                r#"{"minecraft:custom_data":{kept:1}}"#,
+                r#"{"minecraft:max_stack_size":16,"minecraft:rarity":"rare"}"#,
+                r#"{"minecraft:custom_data":{kept:1}}"#,
+            ),
+        ] {
+            let mut stack = ItemStack::new(item, count);
+            (stack.damage, stack.extra) = decode_components(Some(&Tag::Compound(patch(before))));
+            apply_components_and_validate(&mut stack, patch(change), &items);
+            assert_eq!(stack.count, count, "{item}");
+            assert_eq!(
+                encode_components(&stack),
+                Some(Tag::Compound(patch(after))),
+                "{item}"
+            );
+        }
+    }
+
+    fn patch(snbt: &str) -> horizon_core::nbt::Compound {
+        let (Tag::Compound(patch), _) = horizon_core::nbt::parse_snbt(snbt).unwrap() else {
+            panic!("expected a component patch");
+        };
+        patch
+    }
+
+    #[test]
+    fn set_components_rejects_invalid_durability_or_contained_counts() {
+        let items = crate::items::Items::empty();
+        let mut stack = ItemStack::new("minecraft:compass", 1);
+        let nested =
+            r#"{id:"minecraft:compass",count:2,components:{"minecraft:max_stack_size":1}}"#;
+        for invalid in [
+            r#""minecraft:max_damage":1"#.to_owned(),
+            format!(r#""minecraft:container":[{{slot:0,item:{nested}}}]"#),
+            format!(r#""minecraft:charged_projectiles":[{nested}]"#),
+            format!(r#""minecraft:bundle_contents":[{nested}]"#),
+        ] {
+            let snbt = format!(r#"{{"minecraft:rarity":"rare",{invalid}}}"#);
+            apply_components_and_validate(&mut stack, patch(&snbt), &items);
+            assert_eq!(encode_components(&stack), None, "{invalid}");
+        }
+    }
 
     /// `PatchedDataComponentMap.applyPatch`: values equal to the loaded prototype (whose
     /// JSON numbers load as their narrowest tag) leave the patch; differing values,

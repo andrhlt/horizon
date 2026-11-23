@@ -1155,28 +1155,28 @@ impl Game<'_> {
                         set_custom_data(&mut stack, &tag);
                     }
                     "minecraft:set_components" => {
-                        let patch = m["components"].clone();
-                        edit_components(&mut stack, |c| {
-                            for (k, v) in patch.as_object().into_iter().flatten() {
-                                let (remove, key) = match k.strip_prefix('!') {
-                                    Some(rest) => (true, rest),
-                                    None => (false, k.as_str()),
-                                };
-                                let key = if key.contains(':') {
-                                    key.to_owned()
-                                } else {
-                                    format!("minecraft:{key}")
-                                };
-                                if remove {
-                                    c.remove(&key.as_str().into());
-                                } else {
-                                    c.insert(
-                                        key.as_str().into(),
-                                        horizon_client::scoreboard::json_to_tag(v),
-                                    );
-                                }
-                            }
-                        });
+                        // SetComponentsFunction.run validates before ItemCommands limits the count.
+                        if let Some(components) = m["components"].as_object() {
+                            let patch = components
+                                .iter()
+                                .map(|(key, value)| {
+                                    let (prefix, id) = match key.strip_prefix('!') {
+                                        Some(id) => ("!", id),
+                                        None => ("", key.as_str()),
+                                    };
+                                    let id = horizon_world::datafix::dynamic::namespaced(id);
+                                    (
+                                        format!("{prefix}{id}").as_str().into(),
+                                        horizon_client::scoreboard::json_to_tag(value),
+                                    )
+                                })
+                                .collect();
+                            horizon_client::item_data::apply_components_and_validate(
+                                &mut stack,
+                                patch,
+                                self.items(),
+                            );
+                        }
                     }
                     "minecraft:toggle_tooltips" => {
                         let toggles = m["toggles"].clone();
