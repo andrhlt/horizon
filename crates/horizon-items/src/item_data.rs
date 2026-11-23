@@ -1459,17 +1459,6 @@ pub fn parse_stack(snbt: &str) -> Result<Option<ItemStack>, String> {
     let (tag, _) = horizon_core::nbt::parse_snbt(snbt)?;
     Ok(crate::item_nbt::item_from_nbt(&tag))
 }
-/// `parse_stack` against the loaded item prototypes, as `ItemStack.CODEC` builds it.
-pub fn parse_stack_with_items(
-    snbt: &str,
-    items: &crate::items::Items,
-) -> Result<Option<ItemStack>, String> {
-    if snbt == "-" {
-        return Ok(None);
-    }
-    let (tag, _) = horizon_core::nbt::parse_snbt(snbt)?;
-    Ok(crate::item_nbt::item_from_nbt_with_items(&tag, items))
-}
 /// `MapDecorations.Entry.CODEC`: a bare type ID uses the default resource namespace.
 /// Keep preserved entry keys and numeric tags intact; this is not registry validation.
 fn canonical_other_component(id: &str, tag: &Tag) -> Tag {
@@ -2103,7 +2092,7 @@ fn decode_component_patch(
         charged: match seen.charged_projectiles {
             Some(Tag::List(list)) => list
                 .iter()
-                .filter_map(crate::item_nbt::item_from_nbt)
+                .filter_map(crate::item_nbt::item_from_nbt_verbatim)
                 .collect(),
             _ => Vec::new(),
         },
@@ -2207,17 +2196,7 @@ pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nb
     let Some(Tag::Compound(mut patch)) = components_tag(stack.damage, stack.data()) else {
         return;
     };
-    let before = patch.len();
-    patch.retain(|key, value| {
-        // A removal is kept only where the prototype has the component.
-        if let Some(removed) = key.to_string_lossy().strip_prefix('!') {
-            return prototype.contains_key(&JavaString::from(removed));
-        }
-        prototype
-            .get(key)
-            .is_none_or(|default| !same_component_value(&key.to_string_lossy(), value, default))
-    });
-    if patch.len() == before {
+    if !prototype_patch(&mut patch, prototype) {
         return;
     }
     let old = stack.extra.take();
@@ -2232,6 +2211,45 @@ pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nb
         data.map_post_processing = old.map_post_processing;
         data.bundle_selected = old.bundle_selected;
     }
+}
+
+/// The `applyPatch` rule on a saved patch: drop each value equal to the
+/// prototype's, and each removal of a component the prototype lacks. True
+/// when something was dropped.
+pub fn prototype_patch(
+    patch: &mut horizon_core::nbt::Compound,
+    prototype: &horizon_core::nbt::Compound,
+) -> bool {
+    let before = patch.len();
+    patch.retain(|key, value| {
+        let key = key.to_string_lossy();
+        if let Some(removed) = key.strip_prefix('!') {
+            return prototype.contains_key(&JavaString::from(removed));
+        }
+        prototype
+            .get(&JavaString::from(key.as_str()))
+            .is_none_or(|default| !same_component_value(&key, value, default))
+    });
+    patch.len() != before
+}
+
+/// The loaded game's item prototypes (`Items::component_defaults`), which
+/// `item_nbt::item_from_nbt` decodes saved stacks against. The game installs
+/// them when it builds its item table; a new load replaces them.
+static PROTOTYPES: std::sync::RwLock<
+    Option<Arc<std::collections::HashMap<String, horizon_core::nbt::Compound>>>,
+> = std::sync::RwLock::new(None);
+
+/// Install the item prototypes saved stacks decode against.
+pub fn install_prototypes(
+    prototypes: Arc<std::collections::HashMap<String, horizon_core::nbt::Compound>>,
+) {
+    *PROTOTYPES.write().unwrap_or_else(|e| e.into_inner()) = Some(prototypes);
+}
+
+pub(crate) fn installed_prototypes()
+-> Option<Arc<std::collections::HashMap<String, horizon_core::nbt::Compound>>> {
+    PROTOTYPES.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Whether two values of component `key` are equal as its codec reads them.

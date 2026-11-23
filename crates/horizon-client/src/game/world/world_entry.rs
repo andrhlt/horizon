@@ -309,6 +309,8 @@ impl Game<'_> {
         // Item damage predicates use the same frozen registry as player hurt.
         Arc::make_mut(&mut items.enchantments).bind_damage_catalog(&health.damage);
         items.bind_component_damage_catalog(&health.damage);
+        // Saved stacks decode against these prototypes (`ItemStack.CODEC`).
+        horizon_client::item_data::install_prototypes(items.component_defaults.clone());
         // The recipe tables, the stations and the recipe book read one folder:
         // hold its files so it is read once.
         let _recipe_files = horizon_client::json_folder::read(&root.join("data/minecraft/recipe"));

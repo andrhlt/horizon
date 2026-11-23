@@ -161,3 +161,43 @@ fn component_equality_reads_the_effective_value() {
         );
     }
 }
+
+/// Saved stacks decode against the prototypes the game installed when it built
+/// its items (`ItemStack.CODEC` builds them with `applyPatch`): a value equal to
+/// the prototype leaves the patch, another value and a removal of the
+/// prototype's own component stay, and the stack equals a freshly built one.
+#[test]
+#[ignore = "daily"]
+fn saved_stacks_decode_against_the_installed_prototypes() {
+    let mut resources = None;
+    let mut game = server_game(&mut resources);
+    game.build_registries();
+    game.set_allow_commands(true);
+    game.block_ticks
+        .add_empty_chunk(BlockPos::new(0, 0, 0).chunk())
+        .unwrap();
+    assert!(game.run_command("forceload add 0 0 15 15"));
+    assert!(game.run_command("setblock 4 199 4 stone"));
+    assert!(game.run_command(concat!(
+        "setblock 4 200 4 chest{Items:[",
+        r#"{Slot:0b,id:"minecraft:diamond_pickaxe",count:1,components:{"minecraft:damage":0,"minecraft:max_damage":1561,"minecraft:repair_cost":0}},"#,
+        r#"{Slot:1b,id:"minecraft:diamond_pickaxe",count:1,components:{"minecraft:max_damage":100,"!minecraft:damage":{},"!minecraft:custom_name":{}}}"#,
+        "]}"
+    )));
+    let horizon_client::containers::BlockEntity::Chest(slots) =
+        game.world.block_entities.get(&(4, 200, 4)).unwrap()
+    else {
+        panic!("actual chest model missing")
+    };
+    let plain = slots[0].as_ref().unwrap();
+    assert_eq!(horizon_client::item_data::encode_components(plain), None);
+    assert_eq!(plain, &ItemStack::new("minecraft:diamond_pickaxe", 1));
+    assert_eq!(
+        horizon_client::item_data::encode_components(slots[1].as_ref().unwrap()),
+        Some(
+            horizon_core::nbt::parse_snbt(r#"{"minecraft:max_damage":100,"!minecraft:damage":{}}"#)
+                .unwrap()
+                .0
+        )
+    );
+}
