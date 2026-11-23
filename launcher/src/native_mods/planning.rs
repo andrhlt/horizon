@@ -40,17 +40,13 @@ pub(super) fn classify(
     let library_packages: std::collections::BTreeSet<String> = parsed
         .iter()
         .filter_map(Option::as_ref)
-        .flat_map(|project: &api::Project<'_>| project.dependency_tables())
-        .flat_map(|(_, dependencies)| dependencies.iter())
-        .filter_map(|(key, value)| {
-            value.get("path").map(|_| {
-                value
-                    .get("package")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or(key)
-                    .to_owned()
-            })
+        .flat_map(|project: &api::Project<'_>| {
+            dependencies::from_manifest(
+                &project.bundle.manifest.dependencies,
+                horizon_platform::mod_package::manifest::Side::Both,
+            )
         })
+        .map(|dependency| dependency.id)
         .collect();
     for (index, project) in parsed.iter().enumerate() {
         let Some(project) = project else { continue };

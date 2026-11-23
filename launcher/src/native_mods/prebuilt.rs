@@ -73,17 +73,13 @@ impl Refusal {
 pub(super) fn refusal(projects: &[api::Project<'_>]) -> Option<Refusal> {
     let library_packages: std::collections::BTreeSet<String> = projects
         .iter()
-        .flat_map(|project| project.dependency_tables())
-        .flat_map(|(_, dependencies)| dependencies.iter())
-        .filter_map(|(key, value)| {
-            value.get("path").map(|_| {
-                value
-                    .get("package")
-                    .and_then(toml::Value::as_str)
-                    .unwrap_or(key)
-                    .to_owned()
-            })
+        .flat_map(|project| {
+            dependencies::from_manifest(
+                &project.bundle.manifest.dependencies,
+                horizon_platform::mod_package::manifest::Side::Both,
+            )
         })
+        .map(|dependency| dependency.id)
         .collect();
     projects.iter().find_map(|project| {
         project_refusal_with_library_features(project, library_packages.contains(&project.package))
@@ -1553,6 +1549,35 @@ mod tests {
                 mod_id: "example".into()
             })
         );
+    }
+
+    #[test]
+    fn declared_native_library_features_are_allowed_by_build_refusal() {
+        let root = super::super::tests::dir("prebuilt-library-dependency");
+        let parent = root.join("sable");
+        let library = root.join("rapier3d");
+        super::super::tests::write_bundle(&parent, "horizon_sable", "");
+        super::super::tests::write_bundle(&library, "rapier3d", "");
+        fs::write(
+            parent.join(NATIVE_MANIFEST),
+            format!(
+                "{}\n[dependencies.rapier3d]\nversion='0.32.0'\n",
+                fs::read_to_string(parent.join(NATIVE_MANIFEST)).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            library.join("Cargo.toml"),
+            "[package]\nname='rapier3d'\nversion='0.32.0'\nedition='2024'\n[features]\ndim3=[]\nf32=[]\n",
+        )
+        .unwrap();
+        let parent = super::super::bundle_in(&parent).unwrap().unwrap();
+        let library = super::super::bundle_in(&library).unwrap().unwrap();
+        let projects = [
+            api::Project::read(&parent).unwrap(),
+            api::Project::read(&library).unwrap(),
+        ];
+        assert_eq!(refusal(&projects), None);
     }
 
     #[test]
