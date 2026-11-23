@@ -465,6 +465,29 @@ impl World {
                 w
             })
             .collect();
+        // The light still to work out in a region's chunks goes with them: edits made and columns marked since the
+        // last streaming pass (a landed region's players' commands) are the region's streamer's to light.
+        let mut kept = Vec::new();
+        for (p, old, new) in std::mem::take(&mut self.light_edits) {
+            match region_of((p.0 >> 4, p.2 >> 4)) {
+                Some(r) => out[r].light_edits.push((p, old, new)),
+                None => kept.push((p, old, new)),
+            }
+        }
+        if kept.len() != self.light_edits.len() {
+            self.light_checks.clear();
+        }
+        self.light_edits = kept;
+        for key in self.dirty_light.extract_if(|key| region_of(*key).is_some()) {
+            if let Some(r) = region_of(key) {
+                out[r].dirty_light.insert(key);
+            }
+        }
+        for key in self.seam_light.extract_if(|key| region_of(*key).is_some()) {
+            if let Some(r) = region_of(key) {
+                out[r].seam_light.insert(key);
+            }
+        }
         // What a region's ticks read of these, by position: copies of the region's own.
         for (&pos, &v) in &self.chest_openers {
             if let Some(r) = region_of((pos.0 >> 4, pos.2 >> 4)) {

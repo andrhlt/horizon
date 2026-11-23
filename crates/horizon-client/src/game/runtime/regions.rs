@@ -908,9 +908,11 @@ impl Game<'_> {
         if w.regions.link.is_none() {
             w.streaming = self.streaming.fork();
         }
-        self.streaming
+        let unlit = self
+            .streaming
             .release_columns(part.world.chunks.keys().copied());
         w.streaming.adopt_columns(part.world.chunks.values());
+        part.world.dirty_light.extend(unlit);
         w.world = part.world;
         w.block_ticks = part.ticks;
         w.random_tick_sections = part.sections;
@@ -1047,8 +1049,10 @@ impl Game<'_> {
             }
         });
         // The chunks are this game's streamer's now, as they were its lender's before.
-        w.streaming
+        let unlit = w
+            .streaming
             .release_columns(chunks.iter().map(|c| (c.x, c.z)));
+        self.world.dirty_light.extend(unlit);
         self.streaming.adopt_columns(
             chunks
                 .iter()

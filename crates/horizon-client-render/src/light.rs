@@ -1664,6 +1664,76 @@ pub(crate) mod tests {
         world[&(x >> 4, z >> 4)].light(x & 15, y, z & 15) & 15
     }
 
+    /// A big fill at the edge of a region's chunks (the chunk it sends light to belongs to another region and is
+    /// not in its world) gives the light of the whole level, once the chunks are in one world and the chunks
+    /// around the fill are lit again from the blocks (`World::seam_light`): the light is the same as where the
+    /// fill was relit in a world that held every chunk.
+    #[test]
+    fn a_fill_at_the_edge_of_a_region_converges_to_the_light_of_a_whole_level() {
+        let t = tables();
+        let before = world(|_| {});
+        // Torches on 8 x 8 blocks at the east edge of chunk (0, 0).
+        let fill: Vec<Pos> = (8..16)
+            .flat_map(|x| (4..12).map(move |z| (x, 0, z)))
+            .collect();
+        let apply = |w: &mut HashMap<(i32, i32), Arc<Chunk>>| {
+            let chunk = Arc::make_mut(w.get_mut(&(0, 0)).unwrap());
+            for &(x, y, z) in &fill {
+                chunk.set(x, y, z, TORCH);
+            }
+        };
+        // The level that held every chunk.
+        let mut whole = before.clone();
+        apply(&mut whole);
+        relight(&mut whole, &t, true, &fill, false, &mut LightChanges::default());
+        // The region that held the west chunks only: the light sent east is lost.
+        let mut region: HashMap<_, _> = before
+            .iter()
+            .filter(|((x, _), _)| *x <= 0)
+            .map(|(k, c)| (*k, c.clone()))
+            .collect();
+        apply(&mut region);
+        relight(&mut region, &t, true, &fill, false, &mut LightChanges::default());
+        assert_ne!(
+            block(&region, 0, 0, 5),
+            0,
+            "the torches lit their own chunk"
+        );
+        // The east chunks come in; the chunks around the fill are lit again from the blocks.
+        let mut merged = region;
+        merged.extend(before.iter().filter(|((x, _), _)| *x > 0).map(|(k, c)| (*k, c.clone())));
+        let around: Vec<(i32, i32)> = (-1..=1)
+            .flat_map(|z| (-1..=1).map(move |x| (x, z)))
+            .collect();
+        let lit: Vec<_> = around
+            .iter()
+            .map(|&(x, z)| {
+                let r: [[Option<&Chunk>; 3]; 3] = std::array::from_fn(|dz| {
+                    std::array::from_fn(|dx| merged.get(&(x + dx as i32 - 1, z + dz as i32 - 1)).map(|c| &**c))
+                });
+                let mut c = (*merged[&(x, z)]).clone();
+                apply_lighting(&mut c, light_chunk(&r, &t, true));
+                ((x, z), Arc::new(c))
+            })
+            .collect();
+        merged.extend(lit);
+        for &(cx, cz) in &[(0, 0), (1, 0), (0, 1), (1, 1)] {
+            for y in -2..=16 {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        assert_eq!(
+                            merged[&(cx, cz)].light(x, y, z),
+                            whole[&(cx, cz)].light(x, y, z),
+                            "chunk {cx},{cz} block {x},{y},{z}"
+                        );
+                    }
+                }
+            }
+        }
+        // The east chunk really got the torches' light.
+        assert!(block(&merged, 16, 0, 5) > 0);
+    }
+
     const LAMP: u32 = 4;
     /// `tables()` and a lamp that emits 4 and lets light through, as a content block
     /// declaring `light: 4`, `occludes: false` and `dynamic_light: true`.

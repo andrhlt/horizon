@@ -1397,20 +1397,25 @@ impl Streaming {
     }
     /// Chunks that left this streamer's world for another's (or came home): what it keeps by column goes. The
     /// jobs still queued or running for them finish, and what they bring is dropped (a light result finds no
-    /// light job waiting for it, a chunk is not one this streamer owns).
-    pub fn release_columns(&mut self, keys: impl IntoIterator<Item = (i32, i32)>) {
+    /// light job waiting for it, a chunk is not one this streamer owns). Returns the columns whose light job was
+    /// still running: their light is not what the job would have made, and the world they went to lights them
+    /// again (`World::dirty_light`).
+    pub fn release_columns(
+        &mut self,
+        keys: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Vec<(i32, i32)> {
         self.generation_scan.exhausted = false;
-        let gone: FxHashSet<(i32, i32)> = keys.into_iter().collect();
-        if gone.is_empty() {
-            return;
-        }
-        for &key in &gone {
+        let mut unfinished = Vec::new();
+        for key in keys {
             self.lit.remove(&key);
             self.meshed.remove(&key);
-            self.lighting.remove(&key);
+            if self.lighting.remove(&key).is_some() {
+                unfinished.push(key);
+            }
             self.light_snapshots.remove(&key);
             self.decorated.remove(&key);
         }
+        unfinished
     }
     /// Shares generation resources, but gives distant work its own worker state.
     pub fn lod_source(&self) -> Arc<dyn LodSource> {

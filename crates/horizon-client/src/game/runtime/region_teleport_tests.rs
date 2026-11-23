@@ -559,18 +559,16 @@ fn readable(debug: &str) -> String {
     out
 }
 
-/// Bots that walk across new ground in separate regions: each region loads, lights and sends the chunks ahead of
-/// its player itself. No landing is for terrain or for an area that changed, every chunk a bot's view holds is
-/// lit in its region's world, and the bot was sent each of them.
-#[test]
-#[ignore = "daily"]
-fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
+/// A dedicated server of a flat world ticking by regions on this thread, open on a loopback port; its port.
+fn serve_by_regions<'a>(
+    resources: &'a mut Option<Arc<Resources>>,
+    folder: &str,
+    view: i32,
+) -> (Game<'a>, u16) {
     let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
-    let home =
-        std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join("region-explore");
+    let home = std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join(folder);
     let _ = std::fs::remove_dir_all(&home);
-    let mut resources = None;
-    let mut game = open_flat(&mut resources, &root, &home);
+    let mut game = open_flat(resources, &root, &home);
     game.options.dedicated = Some(Vec::new());
     game.options.execution_role = crate::game::execution_role::ExecutionRole::DedicatedServer;
     horizon_client::parallel::set_setting(horizon_client::graphics::ParallelTickMode::On);
@@ -588,8 +586,8 @@ fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
         guest_commands: true,
         force_game_mode: false,
         hardcore: false,
-        view_distance: 3,
-        simulation_distance: 3,
+        view_distance: view,
+        simulation_distance: view,
         dimension: game.dim.id().to_owned(),
         allow_flight: true,
         seed: 1,
@@ -600,6 +598,17 @@ fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
     };
     game.lan_host(settings, net, hub).unwrap();
     let port = game.lan.as_ref().unwrap().settings.port;
+    (game, port)
+}
+
+/// Bots that walk across new ground in separate regions: each region loads, lights and sends the chunks ahead of
+/// its player itself. No landing is for terrain or for an area that changed, every chunk a bot's view holds is
+/// lit in its region's world, and the bot was sent each of them.
+#[test]
+#[ignore = "daily"]
+fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
+    let mut resources = None;
+    let (mut game, port) = serve_by_regions(&mut resources, "region-explore", 3);
     let mut bots = Vec::new();
     for name in ["Alpha", "Bravo"] {
         let joining = std::thread::spawn(move || Bot::connect(port, name));
@@ -721,4 +730,158 @@ fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
         }
         assert!(b.seen.lock().unwrap().left.is_none(), "{} was kicked", b.name);
     }
+}
+
+/// Every chunk of `world` with its eight neighbours is lit as its blocks give: its light is what lighting it again
+/// from scratch gives. How many chunks were compared.
+fn light_matches_blocks(
+    world: &horizon_client::world::World,
+    tables: &horizon_client::light::LightTables,
+) -> std::result::Result<usize, String> {
+    use horizon_client::light::{apply_lighting, light_chunk};
+    let mut compared = 0;
+    let mut wrong: Vec<String> = Vec::new();
+    for (&(x, z), chunk) in world.chunks.iter() {
+        let around: [[Option<&horizon_client::chunk::Chunk>; 3]; 3] = std::array::from_fn(|dz| {
+            std::array::from_fn(|dx| {
+                world
+                    .chunks
+                    .get(&(x + dx as i32 - 1, z + dz as i32 - 1))
+                    .map(|c| &**c)
+            })
+        });
+        if !chunk.lit || around.iter().flatten().any(Option::is_none) {
+            continue;
+        }
+        let mut again = (**chunk).clone();
+        apply_lighting(&mut again, light_chunk(&around, tables, true));
+        let (mut count, mut first) = (0, None);
+        for sy in 0..world.layout().sections() as i32 * 16 {
+            let y = world.layout().min_y() + sy;
+            for bz in 0..16 {
+                for bx in 0..16 {
+                    let (stored, scratch) = (chunk.light(bx, y, bz), again.light(bx, y, bz));
+                    if stored != scratch {
+                        count += 1;
+                        first.get_or_insert((bx, y, bz, stored, scratch));
+                    }
+                }
+            }
+        }
+        if let Some((bx, y, bz, stored, scratch)) = first {
+            wrong.push(format!(
+                "chunk {x},{z}: {count} cells differ, first {bx},{y},{bz}: stored {stored}, from its blocks {scratch} (lit {})",
+                chunk.lit
+            ));
+        }
+        compared += 1;
+    }
+    if wrong.is_empty() {
+        Ok(compared)
+    } else {
+        wrong.sort();
+        Err(format!("{} of {compared} chunks:\n{}", wrong.len(), wrong.join("\n")))
+    }
+}
+
+/// A big `/fill` typed by a player, up to the edge of the chunks loaded: the light of every chunk is the light its
+/// blocks give. `regions`: the player stands in a region (with another far away); without, the level is whole.
+fn a_big_fill_converges(regions: bool) {
+    let mut resources = None;
+    let (mut game, port) = serve_by_regions(&mut resources, "region-fill", 3);
+    let names: &[&'static str] = if regions {
+        &["Alpha", "Bravo"]
+    } else {
+        &["Alpha"]
+    };
+    let mut bots = Vec::new();
+    for &name in names {
+        let joining = std::thread::spawn(move || Bot::connect(port, name));
+        until(&mut game, "a bot's login", 120, |_| joining.is_finished());
+        let bot = joining.join().unwrap().unwrap();
+        BOTS.with(|b| {
+            b.borrow_mut().push(Arc::new(BotSeen {
+                name: bot.name,
+                seen: Arc::clone(&bot.seen),
+            }))
+        });
+        bots.push(bot);
+    }
+    until(&mut game, "the bots in the world", 120, |g| {
+        bots.iter()
+            .all(|b| find(g, b.name).is_some() && b.position().is_some())
+    });
+    let y = find(&mut game, "Alpha").unwrap().position[1];
+    let hub = &mut game.lan.as_mut().unwrap().hub;
+    for b in &bots {
+        hub.ops.insert(offline_uuid(b.name), 4);
+    }
+    hub.refresh_permissions();
+    if regions {
+        let bravo_conn = game
+            .lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.name == "Bravo")
+            .unwrap()
+            .conn;
+        game.teleport_to(Target::Guest(bravo_conn), [4800.5, y, 5.5], None, true);
+        until(&mut game, "two regions", 240, |g| {
+            regions_of(g, Dim::Overworld) == 2
+                && bots
+                    .iter()
+                    .all(|b| find(g, b.name).is_some_and(|h| h.region.is_some()))
+        });
+    }
+    let mut waited = 0;
+    until(&mut game, "the terrain around Alpha", 120, |_| {
+        waited += 1;
+        waited > 100
+            && (-3..=3).all(|x| {
+                (-3..=3).all(|z| bots[0].seen.lock().unwrap().chunks.contains(&(x, z)))
+            })
+    });
+    // Alpha lights the sky and the ground over 31 x 21 x 31 blocks from two chunks east to the third, then
+    // hollows it out.
+    bots[0].command("fill ~20 ~ ~-15 ~50 ~20 ~15 minecraft:glowstone");
+    bots[0].command("fill ~25 ~5 ~-5 ~45 ~15 ~5 minecraft:air");
+    let mut ticks = 0;
+    until(&mut game, "the fill made and its light settled", 240, |_| {
+        ticks += 1;
+        ticks > 400
+    });
+    let tables = game.pack.context.light.clone();
+    let compared = if regions {
+        let h = find(&mut game, "Alpha").unwrap();
+        let slot = game
+            .regions
+            .resident
+            .values_mut()
+            .flat_map(|s| s.games.iter_mut())
+            .find(|s| Some(s.uid) == h.region)
+            .unwrap();
+        let w = slot.game.as_deref().unwrap();
+        assert!(w.world.light_edits.is_empty() && w.world.dirty_light.is_empty());
+        light_matches_blocks(&w.world, &tables)
+    } else {
+        light_matches_blocks(&game.world, &tables)
+    };
+    let compared = compared.unwrap_or_else(|e| panic!("regions {regions}: {e}"));
+    assert!(compared > 20, "chunks compared: {compared}");
+}
+
+#[test]
+#[ignore = "daily"]
+fn a_big_fill_in_a_region_converges_to_the_light_of_its_blocks() {
+    a_big_fill_converges(true);
+}
+
+/// The same fill with regions off: the light the level itself leaves, what the region's must match.
+#[test]
+#[ignore = "daily"]
+fn a_big_fill_in_a_whole_level_converges_to_the_light_of_its_blocks() {
+    a_big_fill_converges(false);
 }

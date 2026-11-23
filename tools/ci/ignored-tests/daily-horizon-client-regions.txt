@@ -15,3 +15,4 @@ horizon-client game::regions::tests::time_weather_and_gamerule_run_in_the_region
 horizon-client game::perf_remote::tests::a_profile_stays_with_its_player_while_their_region_has_them_and_stops_when_they_leave lib daily resources
 # A region streams its own terrain: bots exploring never land a region for terrain or an area.
 horizon-client game::region_teleport_tests::bots_exploring_in_separate_regions_load_their_terrain_without_landing lib daily resources
+horizon-client game::region_teleport_tests::a_big_fill_in_a_region_converges_to_the_light_of_its_blocks lib daily resources
