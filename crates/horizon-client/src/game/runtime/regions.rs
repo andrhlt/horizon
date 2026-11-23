@@ -1450,12 +1450,8 @@ impl Game<'_> {
         self.streaming.lent = Some(Arc::clone(&set.lent));
         // The server's own streamer keeps to what no resident region owns; a region's streamer loads, lights and
         // saves its own, the chunks that are home are the server's again.
-        set.shared.set_landed(
-            set.games
-                .iter()
-                .filter(|s| s.landed)
-                .map(|s| s.uid),
-        );
+        set.shared
+            .set_landed(set.games.iter().filter(|s| s.landed).map(|s| s.uid));
         let own = Arc::clone(&set.shared);
         self.streaming.own = Some(Arc::new(move |x, z| own.server_owns((x, z))));
         // The level as its regions read it at the start of their ticks.
@@ -3570,7 +3566,10 @@ pub(super) mod tests {
                 "gamerule keep_inventory true",
                 "time query daytime",
             ] {
-                assert!(hub.region_handles(&typed(line)), "{line} stays in its region");
+                assert!(
+                    hub.region_handles(&typed(line)),
+                    "{line} stays in its region"
+                );
             }
             // A command that merely starts like one, or reaches players, brings every region home.
             for line in [
@@ -3579,7 +3578,10 @@ pub(super) mod tests {
                 "kill @a",
                 "give Bob stone",
             ] {
-                assert!(!hub.region_handles(&typed(line)), "{line} lands the regions");
+                assert!(
+                    !hub.region_handles(&typed(line)),
+                    "{line} lands the regions"
+                );
             }
         });
     }

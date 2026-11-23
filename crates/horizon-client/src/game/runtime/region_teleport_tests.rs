@@ -244,13 +244,7 @@ impl Bot {
 
     /// Says it stands at `(x, y, z)`: a step of a walk (the server's movement check allows a flying player this).
     fn step_to(&self, x: f64, y: f64, z: f64) {
-        let body = S::MovePlayerPos(play::MovePlayerPos {
-            x,
-            y,
-            z,
-            flags: 1,
-        })
-        .encode();
+        let body = S::MovePlayerPos(play::MovePlayerPos { x, y, z, flags: 1 }).encode();
         let mut writer = self.writer.lock().unwrap();
         let _ = writer.send(&body);
         // A client ends each of its ticks: the server counts one position a tick.
@@ -645,7 +639,10 @@ fn lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_
             .all(|b| find(g, b.name).is_some() && b.position().is_some())
     });
     let y = find(&mut game, "Alpha").unwrap().position[1];
-    for (name, at) in [("Bravo", [4800.5, y, 5.5]), ("Charlie", [-4800.5, y, 4800.5])] {
+    for (name, at) in [
+        ("Bravo", [4800.5, y, 5.5]),
+        ("Charlie", [-4800.5, y, 4800.5]),
+    ] {
         let conn = game
             .lan
             .as_ref()
@@ -675,10 +672,22 @@ fn lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_
                 continue;
             };
             let held = table_ids(w);
-            for g in w.lan.as_ref().unwrap().hub.guests.iter().filter(|g| g.placed) {
+            for g in w
+                .lan
+                .as_ref()
+                .unwrap()
+                .hub
+                .guests
+                .iter()
+                .filter(|g| g.placed)
+            {
                 lent += 1;
                 let id = g.entity_id as u32;
-                assert!(held.contains(&id), "{} is not in the table of their region", g.name);
+                assert!(
+                    held.contains(&id),
+                    "{} is not in the table of their region",
+                    g.name
+                );
                 assert!(
                     !server_ids.contains(&id),
                     "{} is still in the server's table",
@@ -708,7 +717,10 @@ fn lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(at_rest > 0, "the regions were never at rest between two ticks");
+    assert!(
+        at_rest > 0,
+        "the regions were never at rest between two ticks"
+    );
     assert!(
         leaked.is_empty(),
         "passes outstanding with every region at rest (set HORIZON_TRACE_PASSES=1 for where): {leaked:?}"
@@ -717,7 +729,8 @@ fn lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_
     game.land_residents();
     assert_eq!(passes_outstanding(), 0, "{:?}", pass_sites());
     Game::admit_entity_save().expect("a save is admitted once every region is home");
-    game.save_game().expect("the save after the regions came home");
+    game.save_game()
+        .expect("the save after the regions came home");
     game.tick_server(false)
         .expect("a tick after the regions came home and the save");
 }
@@ -866,16 +879,20 @@ fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
     // streamer loads the spawn's chunks.
     let before = regions_of(&game, Dim::Overworld);
     let joining = std::thread::spawn(move || Bot::connect(port, "Charlie"));
-    until(&mut game, "a late bot's login", 120, |_| joining.is_finished());
+    until(&mut game, "a late bot's login", 120, |_| {
+        joining.is_finished()
+    });
     let charlie = joining.join().unwrap().unwrap();
     until(&mut game, "Charlie in a region of their own", 240, |g| {
         regions_of(g, Dim::Overworld) == before + 1
             && find(g, "Charlie").is_some_and(|h| h.region.is_some())
-            && (-3..=3).all(|x| {
-                (-3..=3).all(|z| charlie.seen.lock().unwrap().chunks.contains(&(x, z)))
-            })
+            && (-3..=3)
+                .all(|x| (-3..=3).all(|z| charlie.seen.lock().unwrap().chunks.contains(&(x, z))))
     });
-    assert!(regions_of(&game, Dim::Overworld) >= 2, "the regions stayed out");
+    assert!(
+        regions_of(&game, Dim::Overworld) >= 2,
+        "the regions stayed out"
+    );
     // They did walk: the server holds each where the walk ended, hundreds of blocks on.
     assert!(find(&mut game, "Alpha").unwrap().position[0] > 500.0);
     assert!(find(&mut game, "Bravo").unwrap().position[2] > 500.0);
@@ -913,7 +930,11 @@ fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
                 );
             }
         }
-        assert!(b.seen.lock().unwrap().left.is_none(), "{} was kicked", b.name);
+        assert!(
+            b.seen.lock().unwrap().left.is_none(),
+            "{} was kicked",
+            b.name
+        );
     }
 }
 
@@ -965,7 +986,11 @@ fn light_matches_blocks(
         Ok(compared)
     } else {
         wrong.sort();
-        Err(format!("{} of {compared} chunks:\n{}", wrong.len(), wrong.join("\n")))
+        Err(format!(
+            "{} of {compared} chunks:\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        ))
     }
 }
 
@@ -1025,19 +1050,23 @@ fn a_big_fill_converges(regions: bool) {
     until(&mut game, "the terrain around Alpha", 120, |_| {
         waited += 1;
         waited > 100
-            && (-3..=3).all(|x| {
-                (-3..=3).all(|z| bots[0].seen.lock().unwrap().chunks.contains(&(x, z)))
-            })
+            && (-3..=3)
+                .all(|x| (-3..=3).all(|z| bots[0].seen.lock().unwrap().chunks.contains(&(x, z))))
     });
     // Alpha lights the sky and the ground over 31 x 21 x 31 blocks from two chunks east to the third, then
     // hollows it out.
     bots[0].command("fill ~20 ~ ~-15 ~50 ~20 ~15 minecraft:glowstone");
     bots[0].command("fill ~25 ~5 ~-5 ~45 ~15 ~5 minecraft:air");
     let mut ticks = 0;
-    until(&mut game, "the fill made and its light settled", 240, |_| {
-        ticks += 1;
-        ticks > 400
-    });
+    until(
+        &mut game,
+        "the fill made and its light settled",
+        240,
+        |_| {
+            ticks += 1;
+            ticks > 400
+        },
+    );
     let tables = game.pack.context.light.clone();
     let compared = if regions {
         let h = find(&mut game, "Alpha").unwrap();
@@ -1172,7 +1201,10 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
                 .all(|n| find(g, n).is_some_and(|h| h.region.is_some()))
     });
     let region_of = |g: &mut Game<'_>, n: &str| find(g, n).and_then(|h| h.region);
-    assert_eq!(region_of(&mut game, "Bravo"), region_of(&mut game, "Charlie"));
+    assert_eq!(
+        region_of(&mut game, "Bravo"),
+        region_of(&mut game, "Charlie")
+    );
     // Whatever landed to set this up is not what is measured.
     let base = connection_landings(&game);
 
@@ -1197,9 +1229,14 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
     // Chat: Delta speaks in a region of their own; the players of the other regions read it.
     delta.say("hello from the west");
     until(&mut game, "Delta's line in every region", 120, |_| {
-        [&alpha, &bravo, &charlie, &echo]
-            .iter()
-            .all(|b| b.seen.lock().unwrap().said.iter().any(|t| t == "hello from the west"))
+        [&alpha, &bravo, &charlie, &echo].iter().all(|b| {
+            b.seen
+                .lock()
+                .unwrap()
+                .said
+                .iter()
+                .any(|t| t == "hello from the west")
+        })
     });
 
     // The tab list: Bravo changes their skin layers; the players of other regions are sent the change.
@@ -1216,9 +1253,12 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
     let before = (hats(&alpha), hats(&delta));
     bravo.skin_parts(0);
     bravo.skin_parts(0x40);
-    until(&mut game, "Bravo's hat in the tab list of other regions", 120, |_| {
-        hats(&alpha) > before.0 && hats(&delta) > before.1
-    });
+    until(
+        &mut game,
+        "Bravo's hat in the tab list of other regions",
+        120,
+        |_| hats(&alpha) > before.0 && hats(&delta) > before.1,
+    );
 
     // A leave: Charlie hangs up. Their region saves them and tells the others; Bravo's region stays out.
     charlie.hang_up();
@@ -1283,7 +1323,9 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
             .collect()
     };
     until(&mut game, "every line delivered", 120, |_| {
-        [&alpha, &delta, &echo].iter().all(|b| numbered(b).len() >= 60)
+        [&alpha, &delta, &echo]
+            .iter()
+            .all(|b| numbered(b).len() >= 60)
     });
     for b in [&alpha, &delta, &echo] {
         assert_eq!(
@@ -1295,7 +1337,8 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
     }
     until(&mut game, "Bravo handed to the spawn's region", 120, |g| {
         let (b, a) = (find(g, "Bravo"), find(g, "Alpha"));
-        b.zip(a).is_some_and(|(b, a)| b.region.is_some() && b.region == a.region)
+        b.zip(a)
+            .is_some_and(|(b, a)| b.region.is_some() && b.region == a.region)
     });
 
     // A death and a respawn: Bravo dies in their region, is told of it (and the others read the message), asks to
@@ -1317,9 +1360,14 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
             && bravo.seen.lock().unwrap().deaths > deaths
     });
     until(&mut game, "the death told to the others", 120, |_| {
-        delta.seen.lock().unwrap().chat.iter().any(|l| l.contains("death.")) && {
-            alpha.seen.lock().unwrap().chat.len() > said_before
-        }
+        delta
+            .seen
+            .lock()
+            .unwrap()
+            .chat
+            .iter()
+            .any(|l| l.contains("death."))
+            && { alpha.seen.lock().unwrap().chat.len() > said_before }
     });
     // The dead player stays out of the way: no region comes home for 60 ticks.
     let mut waited = 0;
@@ -1345,9 +1393,16 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
 
     // None of it brought a region home.
     let end = connection_landings(&game);
-    assert_eq!(base, end, "no landing for a join, chat, the list, a leave, a death or a respawn");
+    assert_eq!(
+        base, end,
+        "no landing for a join, chat, the list, a leave, a death or a respawn"
+    );
     for b in [&alpha, &bravo, &delta, &echo] {
-        assert!(b.seen.lock().unwrap().left.is_none(), "{} was kicked", b.name);
+        assert!(
+            b.seen.lock().unwrap().left.is_none(),
+            "{} was kicked",
+            b.name
+        );
     }
 }
 

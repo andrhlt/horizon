@@ -67,7 +67,9 @@ fn red(text: &str) -> Tag {
 pub type SharedChatGuard = std::sync::Arc<std::sync::Mutex<Box<dyn ChatGuard>>>;
 
 fn locked(guard: &SharedChatGuard) -> std::sync::MutexGuard<'_, Box<dyn ChatGuard>> {
-    guard.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    guard
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl Hub {
