@@ -466,6 +466,7 @@ impl Launcher {
         let home = self.mods.home();
         let on = horizon_launcher::browser::java::is_enabled(&home, &row.id);
         let id = row.id.clone();
+        let display_name = row.display_name().to_owned();
         // A mod the stop names is decided on the panel: turning it off here would skip the
         // backup that keeps its worlds' content.
         let named = self.stop_names(&id);
@@ -479,9 +480,12 @@ impl Launcher {
             right.child(if named {
                 self.with_reason(disabled(flip), reason)
             } else {
+                let display_name = display_name.clone();
                 flip.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                     if native && !on && this.settings.native_mods_allowed_at.is_none() {
-                        this.pending_consent = Some(PendingConsent::Local(id.clone()));
+                        this.pending_consent = Some(PendingConsent::Local(
+                            native_consent::NamedMod::new(id.clone(), display_name.clone()),
+                        ));
                         cx.notify();
                         return;
                     }
@@ -508,6 +512,7 @@ impl Launcher {
         // Canceling its prompt turns `mod.<id>` off: only a row that may switch it asks.
         if native && row.switch && self.settings.native_mods_allowed_at.is_none() {
             let id = row.id.clone();
+            let display_name = display_name.clone();
             right = right
                 .child(blocks::badge(tr("Needs permission"), t.muted, &t))
                 .child(
@@ -519,7 +524,9 @@ impl Launcher {
                     )
                     .on_click(cx.listener(
                         move |this, _: &ClickEvent, _, cx| {
-                            this.pending_consent = Some(PendingConsent::Local(id.clone()));
+                            this.pending_consent = Some(PendingConsent::Local(
+                                native_consent::NamedMod::new(id.clone(), display_name.clone()),
+                            ));
                             cx.notify();
                         },
                     )),

@@ -443,7 +443,10 @@ impl Launcher {
     /// A local file's switch, with the native consent step for a native one.
     fn switch_native_mod(&mut self, native: &native_status::Installed, on: bool) {
         if native.native() && !on && self.settings.native_mods_allowed_at.is_none() {
-            self.pending_consent = Some(PendingConsent::Local(native.id.clone()));
+            self.pending_consent = Some(PendingConsent::Local(native_consent::NamedMod::new(
+                native.id.clone(),
+                native.display_name(),
+            )));
             return;
         }
         let home = self.mods.home();

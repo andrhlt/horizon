@@ -147,6 +147,14 @@ impl InstallRequest {
             Self::Installed(source, id) => (*source, id),
         }
     }
+
+    pub(super) fn display_name(&self) -> &str {
+        match self {
+            Self::Browse(p) | Self::Palette(p) if !p.title.trim().is_empty() => &p.title,
+            Self::Browse(p) | Self::Palette(p) => &p.id,
+            Self::Installed(_, id) => id,
+        }
+    }
 }
 
 pub(super) struct Mods {

@@ -1083,6 +1083,7 @@ impl Launcher {
         // trust notice (the glass rows have no button of their own for it).
         let allow = (t.glass && self.settings.native_mods_allowed_at.is_none()).then(|| {
             let id = id.clone();
+            let name = self.native_mod_display_name(mod_id);
             ui::menu_item(
                 "route-allow",
                 tr("Allow native mods").into(),
@@ -1092,7 +1093,10 @@ impl Launcher {
             )
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.mods.route_open = None;
-                this.pending_consent = Some(PendingConsent::Local(id.clone()));
+                this.pending_consent = Some(PendingConsent::Local(native_consent::NamedMod::new(
+                    id.clone(),
+                    name.clone(),
+                )));
                 cx.notify();
             }))
         });

@@ -418,9 +418,9 @@ impl Launcher {
             ("trust", _) => {
                 // Every switched-on native mod, as the real request names them.
                 self.pending_consent = Some(PendingConsent::Build(vec![
-                    "fast-ore".into(),
-                    "greeter".into(),
-                    "hitbox-plus".into(),
+                    native_consent::NamedMod::new("fast-ore", "fast-ore"),
+                    native_consent::NamedMod::new("greeter", "greeter"),
+                    native_consent::NamedMod::new("hitbox-plus", "hitbox-plus"),
                 ]));
             }
             ("log", key) => {

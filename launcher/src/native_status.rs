@@ -166,6 +166,36 @@ pub fn enabled(home: &Path) -> Vec<Mod> {
     out
 }
 
+/// The native mods turned on in game folder `home` as `(id, display_name)` pairs.
+/// Uses each readable manifest's `name` when non-empty, falling back to its `id`.
+pub fn enabled_names(home: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for path in hmods(home) {
+        match horizon_platform::mod_package::index::native::Bundle::read(&path) {
+            Ok(b) => {
+                if java::is_enabled(home, &b.manifest.id) {
+                    let name = if b.manifest.name.trim().is_empty() {
+                        b.manifest.id.clone()
+                    } else {
+                        b.manifest.name
+                    };
+                    out.push((b.manifest.id, name));
+                }
+            }
+            Err(_) if legacy_format(&path) => {}
+            Err(_) => match retired_inject(&path) {
+                Some(id) if java::is_enabled(home, &id) => out.push((id.clone(), id)),
+                Some(_) => {}
+                None => {
+                    let id = stem(&path);
+                    out.push((id.clone(), id));
+                }
+            },
+        }
+    }
+    out
+}
+
 /// The native mods turned on in game folder `home` that pin Horizon commit `revision`.
 pub fn pinning(home: &Path, revision: &str) -> Vec<String> {
     bundles_on(home)
@@ -198,6 +228,7 @@ pub fn declared_internals(manifest: &horizon_platform::mod_package::Manifest) ->
 pub struct Installed {
     pub file: String,
     pub id: String,
+    pub name: String,
     pub version: String,
     pub internals: Vec<String>,
     pub origin: Option<crate::github_mods::Origin>,
@@ -249,6 +280,15 @@ impl Installed {
         self.file
             .strip_prefix(native_mods::INSTALLED)
             .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    /// Display name from the package manifest, falling back to `id`.
+    pub fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
     }
 }
 
@@ -319,12 +359,19 @@ pub fn untracked_reporting(home: &Path, mut found: impl FnMut(&str)) -> Vec<Inst
             // A package refused for the removed `[[inject]]` still names its id, so its row can
             // switch it off, as the build's refusal says to.
             let retired = package.is_err().then(|| retired_inject(&path)).flatten();
-            let (id, version) = package
+            let (id, name, version) = package
                 .as_ref()
-                .map(|p| (p.manifest.id.clone(), p.manifest.version.clone()))
+                .map(|p| {
+                    (
+                        p.manifest.id.clone(),
+                        p.manifest.name.clone(),
+                        p.manifest.version.clone(),
+                    )
+                })
                 .unwrap_or_else(|_| {
                     (
                         retired.clone().unwrap_or_else(|| stem(&path)),
+                        String::new(),
                         String::new(),
                     )
                 });
@@ -342,6 +389,7 @@ pub fn untracked_reporting(home: &Path, mut found: impl FnMut(&str)) -> Vec<Inst
             Some(Installed {
                 file,
                 id,
+                name,
                 version,
                 internals,
                 origin,

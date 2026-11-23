@@ -304,14 +304,43 @@ impl Launcher {
             .children(self.agents_section(cx))
     }
 
+    pub(crate) fn native_mod_display_name(&self, mod_id: &str) -> String {
+        if let Some(entry) = self.mods.installed.iter().find(|e| {
+            horizon_launcher::browser::horizon::mod_id(e) == Some(mod_id)
+                && !e.title.trim().is_empty()
+        }) {
+            return entry.title.clone();
+        }
+        if let Some(row) = self
+            .instance_mods
+            .list
+            .iter()
+            .find(|r| r.native_id() == Some(mod_id) && !r.name.trim().is_empty())
+        {
+            return row.name.clone();
+        }
+        mod_id.to_owned()
+    }
+
     pub(crate) fn request_native_build_consent(&mut self) {
         self.native_consent_build = None;
-        self.pending_consent = Some(PendingConsent::Build(
-            native_status::enabled(&self.mods.home())
-                .into_iter()
-                .map(|(id, _, _)| id)
-                .collect(),
-        ));
+        let mods = native_status::enabled_names(&self.mods.home())
+            .into_iter()
+            .map(|(id, manifest_name)| {
+                let name = self
+                    .mods
+                    .installed
+                    .iter()
+                    .find(|e| {
+                        horizon_launcher::browser::horizon::mod_id(e) == Some(id.as_str())
+                            && !e.title.trim().is_empty()
+                    })
+                    .map(|e| e.title.clone())
+                    .unwrap_or(manifest_name);
+                native_consent::NamedMod::new(id, name)
+            })
+            .collect();
+        self.pending_consent = Some(PendingConsent::Build(mods));
     }
 
     /// Cancel and Escape share the transition; neither can execute a pending action.
@@ -337,7 +366,19 @@ impl Launcher {
         let name = self
             .pending_consent
             .as_ref()
-            .map(PendingConsent::name)
+            .map(|pending| match pending {
+                PendingConsent::Install(crate::mods_page::InstallRequest::Installed(
+                    source,
+                    id,
+                )) => self
+                    .mods
+                    .installed
+                    .iter()
+                    .find(|e| e.source == *source && e.project == *id && !e.title.trim().is_empty())
+                    .map(|e| e.title.clone())
+                    .unwrap_or_else(|| pending.name()),
+                _ => pending.name(),
+            })
             .filter(|name| !name.is_empty());
         let build = matches!(self.pending_consent, Some(PendingConsent::Build(_)));
         let bytes = horizon_launcher::rust_toolchain::host().map(|host| host.download_bytes());
@@ -375,8 +416,8 @@ impl Launcher {
                                 PendingConsent::Toggle(entry) => this.mods_switch(&entry),
                                 PendingConsent::Install(request) => this.mods_install(request),
                                 PendingConsent::Github(found, only) => this.github_install(found, only),
-                                PendingConsent::Local(id) => {
-                                    this.mods.message = horizon_launcher::browser::java::set_enabled(&this.mods.home(), &id, true).err().map(Err);
+                                PendingConsent::Local(m) => {
+                                    this.mods.message = horizon_launcher::browser::java::set_enabled(&this.mods.home(), &m.id, true).err().map(Err);
                                     this.instance_mods_changed();
                                 }
                             } }
