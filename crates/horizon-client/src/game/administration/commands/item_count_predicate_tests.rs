@@ -162,38 +162,64 @@ fn component_equality_reads_the_effective_value() {
     }
 }
 
-/// Saved stacks decode against the prototypes the game installed when it built
-/// its items (`ItemStack.CODEC` builds them with `applyPatch`): a value equal to
-/// the prototype leaves the patch, another value and a removal of the
-/// prototype's own component stay, and the stack equals a freshly built one.
+/// The saved player's stacks: `level.dat`'s read, before the world's tables are
+/// staged, keeps every saved value; the world's load then builds them against its
+/// item prototypes (`ItemStack.CODEC`, `applyPatch`): a value equal to the
+/// prototype leaves the patch, another value and a removal of the prototype's own
+/// component stay.
 #[test]
 #[ignore = "daily"]
-fn saved_stacks_decode_against_the_installed_prototypes() {
+fn saved_player_stacks_load_against_the_world_prototypes() {
     let mut resources = None;
     let mut game = server_game(&mut resources);
-    game.build_registries();
-    game.set_allow_commands(true);
-    game.block_ticks
-        .add_empty_chunk(BlockPos::new(0, 0, 0).chunk())
-        .unwrap();
-    assert!(game.run_command("forceload add 0 0 15 15"));
-    assert!(game.run_command("setblock 4 199 4 stone"));
-    assert!(game.run_command(concat!(
-        "setblock 4 200 4 chest{Items:[",
-        r#"{Slot:0b,id:"minecraft:diamond_pickaxe",count:1,components:{"minecraft:damage":0,"minecraft:max_damage":1561,"minecraft:repair_cost":0}},"#,
-        r#"{Slot:1b,id:"minecraft:diamond_pickaxe",count:1,components:{"minecraft:max_damage":100,"!minecraft:damage":{},"!minecraft:custom_name":{}}}"#,
-        "]}"
-    )));
-    let horizon_client::containers::BlockEntity::Chest(slots) =
-        game.world.block_entities.get(&(4, 200, 4)).unwrap()
-    else {
-        panic!("actual chest model missing")
+    let stack = |components: &str| {
+        let tag = horizon_core::nbt::parse_snbt(&format!(
+            r#"{{id:"minecraft:diamond_pickaxe",count:1,components:{components}}}"#
+        ))
+        .unwrap()
+        .0;
+        let saved = horizon_client::save::item_from_nbt(&tag).unwrap();
+        (tag, saved)
     };
-    let plain = slots[0].as_ref().unwrap();
-    assert_eq!(horizon_client::item_data::encode_components(plain), None);
-    assert_eq!(plain, &ItemStack::new("minecraft:diamond_pickaxe", 1));
+    let (plain, plain_saved) =
+        stack(r#"{"minecraft:damage":0,"minecraft:max_damage":1561,"minecraft:repair_cost":0}"#);
+    let (custom, _) =
+        stack(r#"{"minecraft:max_damage":100,"!minecraft:damage":{},"!minecraft:custom_name":{}}"#);
+    let slotted = |slot: i8, tag: &horizon_core::nbt::Tag| {
+        let mut tag = tag.clone();
+        if let horizon_core::nbt::Tag::Compound(map) = &mut tag {
+            map.insert("Slot".into(), horizon_core::nbt::Tag::Byte(slot));
+        }
+        tag
+    };
+    let player = horizon_core::nbt::Tag::compound([
+        (
+            "Inventory",
+            horizon_core::nbt::Tag::List(vec![slotted(0, &plain), slotted(1, &custom)]),
+        ),
+        (
+            "EnderItems",
+            horizon_core::nbt::Tag::List(vec![slotted(0, &plain)]),
+        ),
+    ]);
+    let mut level = horizon_client::save::Level::default();
+    level.read_player(&player);
+    // Read before staging: nothing is left out.
+    assert_eq!(level.ender_items[0].as_ref(), Some(&plain_saved));
+    let (_, id, count, damage) = level.inventory.iter().find(|row| row.0 == 0).unwrap();
+    let read = ItemStack {
+        item: id.as_str().into(),
+        count: *count,
+        damage: *damage,
+        extra: level.inventory_components.get(&0).cloned(),
+    };
+    assert_eq!(read, plain_saved);
+    let inventory = game.load_saved_inventory(&level);
+    let fresh = ItemStack::new("minecraft:diamond_pickaxe", 1);
+    assert_eq!(inventory[0].as_ref(), Some(&fresh));
+    assert_eq!(game.ender_items[0].as_ref(), Some(&fresh));
     assert_eq!(
-        horizon_client::item_data::encode_components(slots[1].as_ref().unwrap()),
+        horizon_client::item_data::encode_components(inventory[1].as_ref().unwrap()),
         Some(
             horizon_core::nbt::parse_snbt(r#"{"minecraft:max_damage":100,"!minecraft:damage":{}}"#)
                 .unwrap()

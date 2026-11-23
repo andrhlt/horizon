@@ -114,18 +114,20 @@ pub fn item_to_nbt_with_items(stack: &crate::items::ItemStack, items: &crate::it
 /// `Identifier`: `stone` is `minecraft:stone` (a summoned display's or a
 /// command's NBT often leaves the namespace out), and an id that is no valid
 /// identifier makes no stack.
-///
-/// The stack is built as `new ItemStack(item, count, patch)` builds it
-/// (`PatchedDataComponentMap.applyPatch`) against the installed item
-/// prototypes ([`crate::item_data::install_prototypes`]), when there are any.
 pub fn item_from_nbt(tag: &Tag) -> Option<crate::items::ItemStack> {
-    let prototypes = crate::item_data::installed_prototypes();
-    decode_item(tag, |id| prototypes.as_deref().and_then(|p| p.get(id)))
-}
-/// `item_from_nbt` with the patch kept as saved: an `ItemStackTemplate`
-/// (`ChargedProjectiles`) holds its patch without applying it to a prototype.
-pub(crate) fn item_from_nbt_verbatim(tag: &Tag) -> Option<crate::items::ItemStack> {
     decode_item(tag, |_| None)
+}
+/// `item_from_nbt` as `new ItemStack(item, count, patch)` builds it
+/// (`PatchedDataComponentMap.applyPatch`) against the item prototypes of the
+/// game that owns the save (`Items::component_defaults`): a saved value equal
+/// to the prototype's, or a removal of a component it lacks, is left out.
+/// Only a caller holding that game's own table passes it; every other read
+/// keeps the patch as saved.
+pub fn item_from_nbt_in(
+    tag: &Tag,
+    prototypes: &std::collections::HashMap<String, horizon_core::nbt::Compound>,
+) -> Option<crate::items::ItemStack> {
+    decode_item(tag, |id| prototypes.get(id))
 }
 fn decode_item<'a>(
     tag: &Tag,
@@ -313,6 +315,55 @@ mod tests {
                 .0
             )
         );
+    }
+
+    /// A value is left out only against the prototypes of the game that owns the
+    /// save: an explicit `damage:75` is a real override where the default is 0
+    /// and survives a load and save there, and the plain decode keeps every value.
+    #[test]
+    fn only_the_owning_prototypes_leave_a_value_out() {
+        let table = |damage: i32| {
+            let prototype = horizon_core::json_nbt::json_to_compound(
+                serde_json::json!({"minecraft:damage": damage, "minecraft:max_damage": 250})
+                    .as_object()
+                    .unwrap(),
+            )
+            .unwrap();
+            std::collections::HashMap::from([("minecraft:iron_sword".to_owned(), prototype)])
+        };
+        let (vanilla, altered) = (table(0), table(75));
+        let saved = Tag::compound([
+            ("id", string("minecraft:iron_sword")),
+            ("count", Tag::Int(1)),
+            (
+                "components",
+                horizon_core::nbt::parse_snbt(r#"{"minecraft:damage":75}"#)
+                    .unwrap()
+                    .0,
+            ),
+        ]);
+        let damage = |stack: &crate::items::ItemStack| {
+            number(
+                item_to_nbt(stack)
+                    .get("components")
+                    .and_then(|c| c.get("minecraft:damage")),
+            )
+        };
+        for kept in [
+            item_from_nbt(&saved).unwrap(),
+            item_from_nbt_in(&saved, &vanilla).unwrap(),
+        ] {
+            assert_eq!(kept.damage, 75);
+            let resaved = item_to_nbt(&kept);
+            assert_eq!(damage(&kept), Some(75));
+            // A second load and save under the same table keeps it as well.
+            assert_eq!(
+                damage(&item_from_nbt_in(&resaved, &vanilla).unwrap()),
+                Some(75)
+            );
+        }
+        let elided = item_from_nbt_in(&saved, &altered).unwrap();
+        assert_eq!(item_to_nbt(&elided).get("components"), None);
     }
 
     #[test]

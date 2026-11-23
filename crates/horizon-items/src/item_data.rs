@@ -1459,6 +1459,17 @@ pub fn parse_stack(snbt: &str) -> Result<Option<ItemStack>, String> {
     let (tag, _) = horizon_core::nbt::parse_snbt(snbt)?;
     Ok(crate::item_nbt::item_from_nbt(&tag))
 }
+/// `parse_stack` against the owning game's item prototypes (`item_from_nbt_in`).
+pub fn parse_stack_in(
+    snbt: &str,
+    prototypes: &std::collections::HashMap<String, horizon_core::nbt::Compound>,
+) -> Result<Option<ItemStack>, String> {
+    if snbt == "-" {
+        return Ok(None);
+    }
+    let (tag, _) = horizon_core::nbt::parse_snbt(snbt)?;
+    Ok(crate::item_nbt::item_from_nbt_in(&tag, prototypes))
+}
 /// `MapDecorations.Entry.CODEC`: a bare type ID uses the default resource namespace.
 /// Keep preserved entry keys and numeric tags intact; this is not registry validation.
 fn canonical_other_component(id: &str, tag: &Tag) -> Tag {
@@ -2092,7 +2103,7 @@ fn decode_component_patch(
         charged: match seen.charged_projectiles {
             Some(Tag::List(list)) => list
                 .iter()
-                .filter_map(crate::item_nbt::item_from_nbt_verbatim)
+                .filter_map(crate::item_nbt::item_from_nbt)
                 .collect(),
             _ => Vec::new(),
         },
@@ -2231,25 +2242,6 @@ pub fn prototype_patch(
             .is_none_or(|default| !same_component_value(&key, value, default))
     });
     patch.len() != before
-}
-
-/// The loaded game's item prototypes (`Items::component_defaults`), which
-/// `item_nbt::item_from_nbt` decodes saved stacks against. The game installs
-/// them when it builds its item table; a new load replaces them.
-static PROTOTYPES: std::sync::RwLock<
-    Option<Arc<std::collections::HashMap<String, horizon_core::nbt::Compound>>>,
-> = std::sync::RwLock::new(None);
-
-/// Install the item prototypes saved stacks decode against.
-pub fn install_prototypes(
-    prototypes: Arc<std::collections::HashMap<String, horizon_core::nbt::Compound>>,
-) {
-    *PROTOTYPES.write().unwrap_or_else(|e| e.into_inner()) = Some(prototypes);
-}
-
-pub(crate) fn installed_prototypes()
--> Option<Arc<std::collections::HashMap<String, horizon_core::nbt::Compound>>> {
-    PROTOTYPES.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Whether two values of component `key` are equal as its codec reads them.

@@ -50,8 +50,6 @@ pub(super) fn load_world_rest(
             Items::load(root, registry, facts, overlay, resources.item_defaults())
         })?;
         items.bind_component_damage_catalog(&resources.motion().health.damage);
-        // Saved stacks decode against these prototypes (`ItemStack.CODEC`).
-        horizon_client::item_data::install_prototypes(items.component_defaults.clone());
         api_values::resolve_item_registry(&items)?;
         log::info!("load items: {:.2}s", started.elapsed().as_secs_f32());
         progress.set(7);

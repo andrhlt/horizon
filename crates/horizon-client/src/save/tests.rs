@@ -2598,6 +2598,24 @@ fn mod_block_entity_round_trips() {
         block_entity_encode::encode(pos, &back, "gtmod:macerator"),
         saved
     );
+    // A stack saved with a value equal to its item's default (`max_stack_size:64`) is
+    // still an item list: the plain decode keeps the patch as saved, so the list
+    // re-encodes exactly and its slots load.
+    let saved = horizon_core::nbt::parse_snbt(
+        r#"{id:"gtmod:macerator",x:5,y:-60,z:12,Items:[{Slot:0b,id:"minecraft:iron_ore",count:3,components:{"minecraft:max_stack_size":64}}]}"#,
+    )
+    .unwrap()
+    .0;
+    let (pos, back) = decode_block_entity(&saved).expect("mod block entity");
+    let crate::containers::BlockEntity::Mod(m) = &back else {
+        panic!("not a mod's");
+    };
+    assert!(!m.nbt.contains_key(&"Items".into()));
+    assert_eq!(m.items[0].as_ref().map(|s| s.count), Some(3));
+    assert_eq!(
+        block_entity_encode::encode(pos, &back, "gtmod:macerator"),
+        saved
+    );
     // `Items` that are not an item list stay the mod's, as saved.
     for items in [
         r#"Items:{energy:5}"#,
