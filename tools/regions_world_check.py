@@ -146,6 +146,8 @@ def read_console(server, command, pattern, timeout=10):
         for line in server.since(start):
             if m := pattern.search(line):
                 return m
+            if 'No entity was found' in line:
+                return None
         time.sleep(0.2)
     return None
 
