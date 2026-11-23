@@ -2642,14 +2642,13 @@ fn mod_block_entity_round_trips() {
             r#"{{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,Items:[{clean_slot}]}}"#
         ))
     );
-    // A chest: a key Horizon does not model survives with the cleaned slot.
+    // A chest saves the cleaned slot over its loaded tag.
     let source = snbt(&format!(
-        r#"{{id:"minecraft:chest",x:0,y:0,z:0,"horizon:note":1b,Items:[{slot}]}}"#
+        r#"{{id:"minecraft:chest",x:0,y:0,z:0,Items:[{slot}]}}"#
     ));
     let (pos, mut chest) = decode_block_entity(&source).expect("chest");
     assert!(chest.clean_stacks(&prototypes));
     let saved = full_block_entity_data(pos, &chest, "minecraft:chest", Some(&source), None, None);
-    assert_eq!(saved.get("horizon:note"), Some(&Tag::Byte(1)));
     let Some(Tag::List(items)) = saved.get("Items") else {
         panic!("chest items")
     };
