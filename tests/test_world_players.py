@@ -60,11 +60,12 @@ class WorldPlayersTests(unittest.TestCase):
         stats = self.world / 'players' / 'stats' / f'{wp.offline_uuid("Bot0")}.json'
         self.assertEqual(json.loads(stats.read_text()), {'who': 4})
 
-    def test_an_extra_takes_the_next_recent_player_in_its_dimension(self):
+    def test_an_extra_takes_the_most_recent_player_in_its_dimension_before_the_bots(self):
         result = wp.assign(self.world, 2, extras=[('Tester', 'minecraft:the_end')])
         self.assertEqual(result['Tester']['source'], self.players[1])
         self.assertEqual(result['Tester']['dim'], 'minecraft:the_end')
-        self.assertNotIn(result['Tester']['source'], [result['Bot0']['source'], result['Bot1']['source']])
+        # The bots take the most recent of the rest.
+        self.assertEqual([result['Bot0']['source'], result['Bot1']['source']], [self.players[4], self.players[3]])
 
     def test_a_second_run_copies_players_not_bots(self):
         wp.assign(self.world, 2)

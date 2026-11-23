@@ -109,6 +109,8 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
                          other swing, landing it while falling: a critical hit, then a sweep from the
                          ground (give them swords); for PvP benches (crit and sweep particles)
   --name PREFIX          bot names: PREFIX0, PREFIX1...; default Bot
+  --first-index N        number the bots from N (PREFIXN, PREFIXN+1...); default 0: a second run of bots
+                         beside the first, with names of their own
   --brand B              the client brand sent in configuration (minecraft:brand); default none
   --far D                ask the server for far terrain out to D chunks, 1024 at most (horizon:lod, needs
                          --brand horizon and a server with horizon-lod-distance), as a Horizon client with
@@ -225,6 +227,8 @@ struct Options {
     /// --click: the block to open, then the slot, button and click type in its window.
     click: Option<([i32; 3], i16, i8, i32)>,
     name: String,
+    /// --first-index: the number of the first bot's name.
+    first_index: usize,
     /// The `minecraft:brand` to send, if any.
     brand: Option<String>,
     report: Option<String>,
@@ -270,6 +274,7 @@ fn options() -> Result<Options, String> {
         give: Vec::new(),
         click: None,
         name: "Bot".into(),
+        first_index: 0,
         report: None,
         capture: None,
         brand: None,
@@ -360,6 +365,7 @@ fn options() -> Result<Options, String> {
                     return Err(format!("--far {value}: at most {FAR_MAX} chunks"));
                 }
             }
+            "--first-index" => o.first_index = value.parse().map_err(|_| number("a number"))?,
             "--far-after" => o.far_after = value.parse().map_err(|_| number("seconds"))?,
             "--far-dump" => o.far_dump = Some(value),
             "--run" => {
@@ -1269,7 +1275,7 @@ fn run_bot(
     bot: Arc<Bot>,
     until: Arc<Mutex<Option<Instant>>>,
 ) {
-    let name = format!("{}{index}", o.name);
+    let name = format!("{}{}", o.name, index + o.first_index);
     let asked = Instant::now();
     let connection = match join(&o, &name) {
         Ok(c) => c,
@@ -1711,7 +1717,7 @@ fn main() {
     // The uuids of all bots, so that `--pvp false` leaves them alone.
     let bot_uuids: Arc<HashSet<u128>> = Arc::new(
         (0..o.bots)
-            .map(|i| offline_uuid(&format!("{}{i}", o.name)))
+            .map(|i| offline_uuid(&format!("{}{}", o.name, i + o.first_index)))
             .collect(),
     );
     let launcher = {
@@ -1820,7 +1826,7 @@ fn main() {
                 .collect(),
         ),
         "per_bot": bots.iter().enumerate().map(|(i, b)| json!({
-            "name": format!("{}{i}", o.name),
+            "name": format!("{}{}", o.name, i + o.first_index),
             "behaviour": behaviour_of(&o.behaviour, i).name(),
             "joined_after_ms": b.joined_after_ms.load(Ordering::SeqCst),
             "bytes_in": b.bytes_in(),

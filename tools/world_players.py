@@ -14,8 +14,9 @@ offline UUIDs, in a COPY of the world:
   first (`tools/server_bench.py --world` does, per run). The tool refuses a folder inside this repository's
   tracked tree: player data is private and is never committed, so keep copies outside the checkout, or under
   the ignored `.local/`.
-- `--extra NAME=DIMENSION` gives one more offline name the data of the most recent player not yet used who was in
-  that dimension (a tester who must start in the End, say). Repeat it for more.
+- `--extra NAME=DIMENSION` gives one more offline name the data of the most recent player who was in that
+  dimension (a tester who must start in the End, say). The extras choose first, so the bots get the most recent
+  players that are left. Repeat it for more.
 - `--prefix` names the bots (default `Bot`): Bot0 is the most recent player.
 - Which real player went to which bot is written to `bot-sources.json` next to the world copy, not printed: it
   names real players. Only counts per dimension are printed.
@@ -184,8 +185,8 @@ def in_repository(path):
 
 
 def assign(world, count, prefix='Bot', extras=()):
-    """Gives Bot0..Bot{count-1} the data of the `count` most recent players, then each (NAME, DIMENSION) of
-    `extras` the next most recent player in that dimension. Returns {name: {source, uuid, dim, pos}}."""
+    """Gives each (NAME, DIMENSION) of `extras` the most recent player in that dimension, then Bot0..Bot{count-1}
+    the `count` most recent players left. Returns {name: {source, uuid, dim, pos}}."""
     out = {}
     used = set()
     # A bot's own file from an earlier run is no player to copy.
@@ -214,12 +215,13 @@ def assign(world, count, prefix='Bot', extras=()):
             return True
         return False
 
-    for i in range(count):
-        if not take(f'{prefix}{i}'):
-            break
+    # The extras choose first, so a tester can always start in a dimension few players are in.
     for name, wanted in extras:
         if not take(name, wanted):
             raise SystemExit(f'no player left who was in {wanted} for {name}')
+    for i in range(count):
+        if not take(f'{prefix}{i}'):
+            break
     return out
 
 
