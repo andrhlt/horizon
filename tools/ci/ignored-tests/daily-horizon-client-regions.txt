@@ -18,3 +18,5 @@ horizon-client game::perf_remote::tests::a_profile_stays_with_its_player_while_t
 horizon-client game::region_teleport_tests::bots_exploring_in_separate_regions_load_their_terrain_without_landing lib daily resources
 horizon-client game::region_teleport_tests::a_big_fill_in_a_region_converges_to_the_light_of_its_blocks lib daily resources
 horizon-client game::region_teleport_tests::a_big_fill_in_a_whole_level_converges_to_the_light_of_its_blocks lib daily resources
+# A player's connection belongs to their region: joins, leaves, deaths, respawns, chat and the tab list across regions land none.
+horizon-client game::region_teleport_tests::players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_with_no_landing lib daily resources

@@ -734,3 +734,34 @@ fn busy_raw_root_keeps_the_head_and_yields_until_the_next_receiving_turn() {
         });
     });
 }
+
+/// A player's violation levels and timer balance are their own: they go with them when a region hands them to
+/// another region's hub, and a change of the server's settings reaches a region's anticheat.
+#[test]
+fn a_players_anticheat_state_follows_them_across_hubs() {
+    use horizon_anticheat::Check;
+    let (mut hub, _out) = hub_with_a_guest();
+    hub.set_anticheat(horizon_anticheat::Config::default());
+    let config = hub.anticheat.as_ref().unwrap().config.clone();
+    let mut first = hub.region_shell();
+    first.copy_region_settings(&hub);
+    first.guests.push(hub.guests.remove(0));
+    first.guests.update(0, |g| {
+        g.anticheat.flag(&config, Check::Ground, 3.0, 100);
+        g.anticheat.timer.ms = 123.0;
+    });
+    // Handed to the hub of another region.
+    let mut second = hub.region_shell();
+    second.copy_region_settings(&hub);
+    let guest = first.guests.take_rows().pop().unwrap();
+    second.guests.push(guest);
+    let g = &second.guests[0];
+    assert!(g.anticheat.vl(&config, Check::Ground, 100) >= 2.9);
+    assert_eq!(g.anticheat.timer.ms, 123.0);
+    // The server's settings changed: the region's hub takes them at its next start.
+    let mut changed = config.clone();
+    changed.log = "logs/changed.log".to_owned();
+    hub.set_anticheat(changed.clone());
+    second.copy_region_settings(&hub);
+    assert_eq!(second.anticheat.as_ref().unwrap().config, changed);
+}

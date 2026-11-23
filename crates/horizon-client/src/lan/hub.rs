@@ -942,6 +942,11 @@ impl Hub {
         // The region's players are checked on its thread, with the server's settings, flag log and kicks.
         if self.anticheat.is_some() != from.anticheat.is_some() {
             self.anticheat = from.anticheat.as_ref().map(|a| Box::new(a.for_region()));
+        } else if let (Some(own), Some(server)) = (self.anticheat.as_deref_mut(), from.anticheat.as_deref())
+            && own.config != server.config
+        {
+            // A live change of the settings reaches the players of every region.
+            own.config = server.config.clone();
         }
     }
 
