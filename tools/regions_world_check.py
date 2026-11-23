@@ -394,7 +394,7 @@ def make_world(args):
     try:
         server.console('gamerule respawn_radius 0')
         bots, lines = start_bots(args, port, 'Seed', args.players, 'scatter', 600, out / 'make-world-bots.json', join_every=0.3)
-        time.sleep(args.players * 0.3 + 150)
+        time.sleep(args.players * 0.3 + args.settle)
         end, nether = max(1, args.players // 14), max(1, args.players // 30)
         moves = [(i, END, f'{(i % 7) * 40 - 120} 70 {(i % 5) * 40 - 80}') for i in range(args.players - end - nether, args.players - nether)]
         moves += [(i, NETHER, f'{(i % 7) * 40 - 60} 70 {(i % 5) * 40 - 60}') for i in range(args.players - nether, args.players)]
@@ -443,6 +443,9 @@ def main():
     m = sub.add_parser('make-world', parents=[common])
     m.add_argument('--players', type=int, default=100)
     m.add_argument('--world-out', type=Path, default=None)
+    m.add_argument('--settle', type=int, default=600,
+                   help='seconds the bots stand in their cells before the save, so the server generates and saves '
+                        'the chunks round them (a world a bench loads from disk, not generates)')
     args = parser.parse_args()
     return check(args) if args.command == 'check' else make_world(args)
 
