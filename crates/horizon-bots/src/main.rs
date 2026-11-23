@@ -1380,8 +1380,12 @@ fn run_bot(
         // A teleport from the server wins over where the bot thought it was.
         if let Some(at) = lock(&bot.teleport).take() {
             // A roam bot walks about wherever it was put last (a respawn is far from where it died).
-            if behaviour == Behaviour::Roam && distance(at, pos) > 32.0 {
-                home = at;
+            // A roam bot that was pulled back (a wall in its way) picks another goal: the same one would
+            // push it into the same wall every tick.
+            if behaviour == Behaviour::Roam {
+                if distance(at, pos) > 32.0 {
+                    home = at;
+                }
                 target = at;
             }
             pos = at;
