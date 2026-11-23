@@ -32,6 +32,15 @@ struct Seen {
     chat: Vec<String>,
     /// The chunks the server sent and has not told it to forget.
     chunks: std::collections::HashSet<(i32, i32)>,
+    /// The chat messages players said, as it was sent them (`ClientboundPlayerChatPacket`), in order.
+    said: Vec<String>,
+    /// The tab list updates: the player and the hat flag it carried, in order.
+    tab: Vec<(u128, Option<bool>)>,
+    /// The players the tab list dropped.
+    tab_removed: Vec<u128>,
+    /// How many times it was shown the death screen, and was sent a respawn.
+    deaths: u32,
+    respawns: u32,
 }
 
 thread_local! {
@@ -126,7 +135,20 @@ impl Bot {
                 };
                 match packet {
                     C::Login(l) => s.lock().unwrap().dimension = l.spawn.dimension,
-                    C::Respawn(r) => s.lock().unwrap().dimension = r.spawn.dimension,
+                    C::Respawn(r) => {
+                        let mut seen = s.lock().unwrap();
+                        seen.dimension = r.spawn.dimension;
+                        seen.respawns += 1;
+                    }
+                    C::PlayerChat(c) => s.lock().unwrap().said.push(c.content),
+                    C::PlayerInfoUpdate(u) => {
+                        let mut seen = s.lock().unwrap();
+                        for e in u.entries {
+                            seen.tab.push((e.uuid, e.show_hat));
+                        }
+                    }
+                    C::PlayerInfoRemove(r) => s.lock().unwrap().tab_removed.extend(r.uuids),
+                    C::PlayerCombatKill(_) => s.lock().unwrap().deaths += 1,
                     C::PlayerPosition(p) => {
                         s.lock().unwrap().position = Some(p.position);
                         send(S::AcceptTeleportation(play::AcceptTeleportation {
@@ -178,6 +200,46 @@ impl Bot {
         })
         .encode();
         self.writer.lock().unwrap().send(&body).unwrap();
+    }
+
+    /// Says `text` in chat.
+    fn say(&self, text: &str) {
+        let body = S::Chat(play::Chat {
+            message: text.to_owned(),
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64),
+            salt: 0,
+            signature: None,
+            last_seen: play::LastSeenUpdate {
+                offset: 0,
+                acknowledged: [0; 3],
+                checksum: 0,
+            },
+        })
+        .encode();
+        self.writer.lock().unwrap().send(&body).unwrap();
+    }
+
+    /// Asks to respawn from the death screen.
+    fn respawn(&self) {
+        let body = S::ClientCommand(play::ClientCommand { action: 0 }).encode();
+        self.writer.lock().unwrap().send(&body).unwrap();
+    }
+
+    /// Sends its client information with the skin layers `parts` (bit 6: the hat).
+    fn skin_parts(&self, parts: u8) {
+        let mut info = ClientInformation::new(2);
+        info.model_customisation = parts;
+        let body = S::ClientInformation(info).encode();
+        self.writer.lock().unwrap().send(&body).unwrap();
+    }
+
+    /// Closes its connection.
+    fn hang_up(&self) {
+        if let Ok(closer) = self.writer.lock().unwrap().closer() {
+            closer.close();
+        }
     }
 
     /// Says it stands at `(x, y, z)`: a step of a walk (the server's movement check allows a flying player this).
@@ -1007,4 +1069,294 @@ fn a_big_fill_in_a_region_converges_to_the_light_of_its_blocks() {
 #[ignore = "daily"]
 fn a_big_fill_in_a_whole_level_converges_to_the_light_of_its_blocks() {
     a_big_fill_converges(false);
+}
+
+/// How often regions came home for the reasons that stood for a player's connection, a join, a leave, a death, a
+/// respawn or a line of chat.
+fn connection_landings(game: &Game<'_>) -> Vec<(&'static str, u32)> {
+    [
+        "packet",
+        "chat",
+        "guest here",
+        "region wants",
+        "command",
+        "native mod",
+        "level-wide",
+        "duplicate login",
+        "teleport",
+    ]
+    .iter()
+    .map(|why| (*why, game.regions.prof.landed_for(why)))
+    .collect()
+}
+
+/// Runs `f` on the game of the region that holds the player `name`, while it is at rest between two ticks.
+fn in_region<R>(game: &mut Game<'_>, name: &str, f: impl FnOnce(&mut Game<'_>) -> R) -> Option<R> {
+    for set in game.regions.resident.values_mut() {
+        for slot in &mut set.games {
+            let _ = slot.home(Some(Instant::now()));
+            let Some(w) = slot.game.as_deref_mut() else {
+                continue;
+            };
+            if w.lan
+                .as_ref()
+                .is_some_and(|h| h.hub.guests.iter().any(|g| g.name == name && g.placed))
+            {
+                return Some(f(w));
+            }
+        }
+    }
+    None
+}
+
+fn join_bot(game: &mut Game<'_>, port: u16, name: &'static str) -> Bot {
+    let joining = std::thread::spawn(move || Bot::connect(port, name));
+    until(game, "a bot's login", 120, |_| joining.is_finished());
+    let bot = joining.join().unwrap().unwrap();
+    BOTS.with(|b| {
+        b.borrow_mut().push(Arc::new(BotSeen {
+            name: bot.name,
+            seen: Arc::clone(&bot.seen),
+        }))
+    });
+    bot
+}
+
+fn guest_conn(game: &Game<'_>, name: &str) -> u32 {
+    game.lan
+        .as_ref()
+        .unwrap()
+        .hub
+        .guests
+        .iter()
+        .find(|g| g.name == name)
+        .unwrap()
+        .conn
+}
+
+/// A player's connection belongs to their region. With players in three regions of a level, a late join, chat, a
+/// tab list change, a leave, a death and a respawn each happen in the region that holds the player, with no
+/// region coming home for any of them; chat and the tab list reach the players of the other regions; and the
+/// packets of a player handed from one region to another arrive in the order they were sent, none lost.
+#[test]
+#[ignore = "daily"]
+fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_with_no_landing() {
+    let mut resources = None;
+    let (mut game, port) = serve_by_regions(&mut resources, "region-connections", 2);
+    let (alpha, bravo, charlie, delta) = (
+        join_bot(&mut game, port, "Alpha"),
+        join_bot(&mut game, port, "Bravo"),
+        join_bot(&mut game, port, "Charlie"),
+        join_bot(&mut game, port, "Delta"),
+    );
+    until(&mut game, "the bots in the world", 120, |g| {
+        [&alpha, &bravo, &charlie, &delta]
+            .iter()
+            .all(|b| find(g, b.name).is_some() && b.position().is_some())
+    });
+    let y = find(&mut game, "Alpha").unwrap().position[1];
+    // Alpha stays at the spawn; Bravo and Charlie are together far east; Delta is far west: three regions.
+    let east = [4800.5, y, 5.5];
+    for (name, at) in [
+        ("Bravo", east),
+        ("Charlie", [4802.5, y, 5.5]),
+        ("Delta", [-4800.5, y, 4800.5]),
+    ] {
+        let conn = guest_conn(&game, name);
+        game.teleport_to(Target::Guest(conn), at, None, true);
+    }
+    until(&mut game, "three regions", 240, |g| {
+        regions_of(g, Dim::Overworld) == 3
+            && ["Alpha", "Bravo", "Charlie", "Delta"]
+                .iter()
+                .all(|n| find(g, n).is_some_and(|h| h.region.is_some()))
+    });
+    let region_of = |g: &mut Game<'_>, n: &str| find(g, n).and_then(|h| h.region);
+    assert_eq!(region_of(&mut game, "Bravo"), region_of(&mut game, "Charlie"));
+    // Whatever landed to set this up is not what is measured.
+    let base = connection_landings(&game);
+
+    // A join: Echo logs in while the regions are out, at the spawn where Alpha's region holds the ground.
+    let echo = join_bot(&mut game, port, "Echo");
+    until(&mut game, "Echo in a region", 240, |g| {
+        find(g, "Echo").is_some_and(|h| h.region.is_some()) && echo.position().is_some()
+    });
+    let (e, a) = (region_of(&mut game, "Echo"), region_of(&mut game, "Alpha"));
+    assert_eq!(e, a, "Echo joined the region that owns the spawn");
+    until(&mut game, "the others told of Echo", 60, |_| {
+        [&alpha, &bravo, &delta].iter().all(|b| {
+            b.seen
+                .lock()
+                .unwrap()
+                .chat
+                .iter()
+                .any(|l| l.contains("multiplayer.player.joined") && l.contains("Echo"))
+        })
+    });
+
+    // Chat: Delta speaks in a region of their own; the players of the other regions read it.
+    delta.say("hello from the west");
+    until(&mut game, "Delta's line in every region", 120, |_| {
+        [&alpha, &bravo, &charlie, &echo]
+            .iter()
+            .all(|b| b.seen.lock().unwrap().said.iter().any(|t| t == "hello from the west"))
+    });
+
+    // The tab list: Bravo changes their skin layers; the players of other regions are sent the change.
+    let bravo_uuid = offline_uuid("Bravo");
+    let hats = |b: &Bot| {
+        b.seen
+            .lock()
+            .unwrap()
+            .tab
+            .iter()
+            .filter(|(u, hat)| *u == bravo_uuid && hat.is_some())
+            .count()
+    };
+    let before = (hats(&alpha), hats(&delta));
+    bravo.skin_parts(0);
+    bravo.skin_parts(0x40);
+    until(&mut game, "Bravo's hat in the tab list of other regions", 120, |_| {
+        hats(&alpha) > before.0 && hats(&delta) > before.1
+    });
+
+    // A leave: Charlie hangs up. Their region saves them and tells the others; Bravo's region stays out.
+    charlie.hang_up();
+    let charlie_uuid = offline_uuid("Charlie");
+    until(&mut game, "Charlie gone, the others told", 240, |g| {
+        find(g, "Charlie").is_none()
+            && [&alpha, &bravo, &delta].iter().all(|b| {
+                let seen = b.seen.lock().unwrap();
+                seen.tab_removed.contains(&charlie_uuid)
+                    && seen
+                        .chat
+                        .iter()
+                        .any(|l| l.contains("multiplayer.player.left") && l.contains("Charlie"))
+            })
+    });
+    assert!(
+        game.lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .all(|g| g.name != "Charlie")
+    );
+    assert!(
+        std::env::var_os("HORIZON_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap()
+            .join("region-connections/saves/regions/playerdata")
+            .join(format!("{}.dat", horizon_protocol::crypto::uuid_string(charlie_uuid)))
+            .exists(),
+        "the leave saved Charlie"
+    );
+
+    // Order over a hand-off: Bravo says 0 to 59, one a tick, and is handed from the east region to the one at the
+    // spawn in the middle. Every region's players read all sixty, in order.
+    let spawn_at = find(&mut game, "Alpha").unwrap().position;
+    let mut tick = 0u32;
+    until(&mut game, "sixty lines", 240, |g| {
+        if tick < 60 {
+            bravo.say(&format!("n{tick}"));
+        }
+        if tick == 25 {
+            let uuid = bravo_uuid;
+            in_region(g, "Bravo", |w| {
+                w.teleport_player_task(
+                    uuid,
+                    super::region_tasks::Arrival {
+                        dim: Dim::Overworld,
+                        position: spawn_at,
+                        rotation: None,
+                    },
+                );
+            })
+            .expect("Bravo's region at rest");
+        }
+        tick += 1;
+        tick > 60
+    });
+    let numbered = |b: &Bot| -> Vec<u32> {
+        b.seen
+            .lock()
+            .unwrap()
+            .said
+            .iter()
+            .filter_map(|t| t.strip_prefix('n').and_then(|n| n.parse().ok()))
+            .collect()
+    };
+    until(&mut game, "every line delivered", 120, |_| {
+        [&alpha, &delta, &echo].iter().all(|b| numbered(b).len() >= 60)
+    });
+    for b in [&alpha, &delta, &echo] {
+        assert_eq!(
+            numbered(b),
+            (0..60).collect::<Vec<u32>>(),
+            "{} read Bravo's lines in order, none lost",
+            b.name
+        );
+    }
+    until(&mut game, "Bravo handed to the spawn's region", 120, |g| {
+        let (b, a) = (find(g, "Bravo"), find(g, "Alpha"));
+        b.zip(a).is_some_and(|(b, a)| b.region.is_some() && b.region == a.region)
+    });
+
+    // A death and a respawn: Bravo dies in their region, is told of it (and the others read the message), asks to
+    // respawn, and is sent the new life, at the world spawn.
+    let deaths = bravo.seen.lock().unwrap().deaths;
+    let respawns = bravo.seen.lock().unwrap().respawns;
+    let said_before = alpha.seen.lock().unwrap().chat.len();
+    let conn = guest_conn_in(&mut game, "Bravo");
+    until(&mut game, "Bravo dying", 120, |g| {
+        in_region(g, "Bravo", |w| {
+            w.lan
+                .as_mut()
+                .unwrap()
+                .hub
+                .update_guest(conn, |g| g.health = 0.0)
+                .is_some()
+        })
+        .unwrap_or(false)
+            && bravo.seen.lock().unwrap().deaths > deaths
+    });
+    until(&mut game, "the death told to the others", 120, |_| {
+        delta.seen.lock().unwrap().chat.iter().any(|l| l.contains("death.")) && {
+            alpha.seen.lock().unwrap().chat.len() > said_before
+        }
+    });
+    // The dead player stays out of the way: no region comes home for 60 ticks.
+    let mut waited = 0;
+    until(&mut game, "a dead player's ticks", 60, |_| {
+        waited += 1;
+        waited > 60
+    });
+    bravo.respawn();
+    until(&mut game, "Bravo respawned", 240, |g| {
+        bravo.seen.lock().unwrap().respawns > respawns
+            && find(g, "Bravo").is_some_and(|h| h.region.is_some())
+            && in_region(g, "Bravo", |w| {
+                w.lan
+                    .as_ref()
+                    .unwrap()
+                    .hub
+                    .guests
+                    .iter()
+                    .any(|g| g.name == "Bravo" && !g.dead && g.health > 0.0)
+            })
+            .unwrap_or(false)
+    });
+
+    // None of it brought a region home.
+    let end = connection_landings(&game);
+    assert_eq!(base, end, "no landing for a join, chat, the list, a leave, a death or a respawn");
+    for b in [&alpha, &bravo, &delta, &echo] {
+        assert!(b.seen.lock().unwrap().left.is_none(), "{} was kicked", b.name);
+    }
+}
+
+/// The connection of the player `name` in whichever game holds them.
+fn guest_conn_in(game: &mut Game<'_>, name: &str) -> u32 {
+    in_region(game, name, |w| guest_conn(w, name)).expect("a region holds the player")
 }
