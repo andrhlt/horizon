@@ -780,7 +780,7 @@ fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
     let mut tick = 0u32;
     until(&mut game, "the walk", 240, |_| {
         tick += 1;
-        if tick % 2 == 0 {
+        if tick.is_multiple_of(2) {
             let along = f64::from(tick / 2);
             bots[0].step_to(start[0][0] + along, y, start[0][1]);
             bots[1].step_to(start[1][0], y, start[1][1] + along);
