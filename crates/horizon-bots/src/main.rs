@@ -2046,10 +2046,26 @@ mod tests {
 
     #[test]
     fn every_listed_behaviour_has_its_own_name() {
-        for name in BEHAVIOURS {
-            if name == "mixed" {
-                continue;
-            }
+        for name in [
+            "idle",
+            "stand",
+            "roam",
+            "hotbar",
+            "walk",
+            "explore",
+            "scatter",
+            "fight",
+            "flood-move",
+            "flood-acks",
+            "flood-packets",
+            "flood-chunks",
+            "flood-use",
+            "flood-click",
+            "flood-suggest",
+            "flood-book",
+            "flood-sign",
+            "flood-recipe",
+        ] {
             assert_eq!(behaviour_of(name, 0).name(), name, "--behaviour {name}");
         }
     }
