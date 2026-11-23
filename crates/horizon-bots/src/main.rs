@@ -89,6 +89,8 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
   --attack-rounds N      stop after N rounds of attacks (each hits every target seen so far once);
                          default no limit
   --no-swing             attack without swinging (a kill aura hiding its swing, for the anticheat's tests)
+  --stdin-stop           end the run, with its report, when a line `stop` arrives on standard input (a bench that
+                         starts its measure window once the bots hold their chunks)
   --no-respawn           stay dead: no respawn request at SetHealth 0 (a player left on the death screen)
   --run TICK:COMMAND     a command (no slash) each bot types TICK ticks after joining, as a player does; repeat
                          the flag for more (the command runs as that player, not on the console)
@@ -210,6 +212,8 @@ struct Options {
     no_loaded: bool,
     /// --no-respawn: a dead bot stays on the death screen.
     no_respawn: bool,
+    /// --stdin-stop: a line `stop` on standard input ends the run.
+    stdin_stop: bool,
     /// --run: (tick after joining, command) every bot types.
     run: Vec<(u64, String)>,
     height: f64,
@@ -258,6 +262,7 @@ fn options() -> Result<Options, String> {
         no_read: false,
         no_loaded: false,
         no_respawn: false,
+        stdin_stop: false,
         run: Vec::new(),
         height: 24.0,
         ground: false,
@@ -289,6 +294,10 @@ fn options() -> Result<Options, String> {
         }
         if arg == "--crits" {
             o.crits = true;
+            continue;
+        }
+        if arg == "--stdin-stop" {
+            o.stdin_stop = true;
             continue;
         }
         if arg == "--no-respawn" {
@@ -1657,6 +1666,9 @@ fn wants_respawn(health: f32) -> bool {
     health <= 0.0
 }
 
+/// A `stop` line arrived on standard input (--stdin-stop).
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
 fn behaviour_of(mode: &str, index: usize) -> Behaviour {
     match mode {
         "idle" => Behaviour::Idle,
@@ -1718,6 +1730,19 @@ fn main() {
             handles
         })
     };
+    if o.stdin_stop {
+        let until = until.clone();
+        thread::spawn(move || {
+            for line in std::io::stdin().lines() {
+                if line.is_ok_and(|l| l.trim() == "stop") {
+                    *lock(&until) = Some(Instant::now());
+                    // The main loop sets the end once the first bot is in; keep it from moving this one.
+                    STOPPED.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        });
+    }
     // The run lasts --seconds after the first bot is in.
     let mut previous_chunks = 0;
     let mut first = None;
@@ -1734,7 +1759,9 @@ fn main() {
         let failed = bots.iter().filter(|b| lock(&b.error).is_some()).count();
         if first.is_none() && online > 0 {
             first = Some(Instant::now());
-            *lock(&until) = Some(Instant::now() + Duration::from_secs(o.seconds));
+            if !STOPPED.load(Ordering::SeqCst) {
+                *lock(&until) = Some(Instant::now() + Duration::from_secs(o.seconds));
+            }
         }
         println!(
             "{}",

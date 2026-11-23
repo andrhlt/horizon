@@ -36,6 +36,17 @@ Two more Java servers, both dev-only downloads into .local/server-bench/jars (ne
   tools/benchmark-deps/mods.lock.json (and Fabric API only if Lithium asks for it), checked against the lock's SHA-512.
 Both run with the same heap as vanilla (`--heap`).
 
+A copy of a real world: `--world DIR` gives every run a fresh copy of the world folder DIR (it holds `level.dat`;
+the copy is deleted after the run, and the original is never touched). The copy's server settings are the
+benchmark's own: offline mode, bound to 127.0.0.1 (unless `--bots-via` is on), automatic backups off, no Discord
+webhook or other secret (only the world folder is copied, never the server's settings). `--clone-players` gives
+`Bot0..BotN-1` the saved data of the world's N most recently active players (tools/world_players.py), so the bots
+stand where those players stood. The bots are held to `--ready-timeout`: the measure window starts, after
+`--warmup`, only once every bot holds the chunks round it (`ready` in horizon-bots' line), and the run reports
+how long that took (`load_seconds`). `--regions alternate` with `--repeat N` runs regions off and on, one after
+the other and in the opposite order every second round; the report gives each regions-on run's landing ticks and
+the reasons regions came home (`landings`).
+
 `--profile[=ARGS]` has Horizon record its measure window with `horizon-report ARGS` and attaches the run's record with `horizon-perf attach` (docs/hosting.md).
 
 `pumpkin` runs Pumpkin (github.com/Pumpkin-MC/Pumpkin, GPL-3.0), a binary you built yourself and name with
@@ -63,11 +74,12 @@ import urllib.request
 import zipfile
 
 try:
-    from . import lab, runtime, test_rust_parity as base
+    from . import lab, runtime, test_rust_parity as base, world_players
 except ImportError:
     import lab
     import runtime
     import test_rust_parity as base
+    import world_players
 
 ROOT = lab.ROOT
 EXE = '.exe' if os.name == 'nt' else ''
@@ -345,6 +357,96 @@ def tick_query(server):
     return {'average': average, 'p50': percentiles[0], 'p95': percentiles[1], 'p99': percentiles[2]}
 
 
+# The server's own profile of region ticking (one line every 200 ticks), and what a problem looks like in its log.
+REGION_WINDOW = re.compile(r'regions: wait .*?landing ticks (\d+) \(.*?; (\d+) landings, (\d+) splits, landed for: ?(.*)$')
+REGION_REASON = re.compile(r'\s*(.+?) (\d+)\s*(?:,|$)')
+REGION_TICKS_PER_WINDOW = 200
+PROBLEMS = {
+    'entity_ids_exhausted': 'entity ids exhausted',
+    'entity_pass_lifted': 'entity pass is lifted',
+    'save_lost_entities': 'regions: save lost entities',
+    'region_failed': 'a region of',
+    'panicked': 'panicked',
+    'game_stopped': 'The game stopped unexpectedly',
+}
+
+
+def region_landings(lines):
+    """What the server's region profile lines (`regions: wait ...`, one every 200 ticks) say about landings: the
+    ticks they cover, the ticks that landed or split a region, the landings and splits, and why regions came home.
+    None when there is no such line (regions off, or a window too short to log one)."""
+    windows = ticks = landing_ticks = lands = splits = 0
+    reasons = {}
+    for line in lines:
+        if 'regions: wait' not in line:
+            continue
+        m = REGION_WINDOW.search(line)
+        if not m:
+            continue
+        windows += 1
+        ticks += REGION_TICKS_PER_WINDOW
+        landing_ticks += int(m.group(1))
+        lands += int(m.group(2))
+        splits += int(m.group(3))
+        for why, n in REGION_REASON.findall(m.group(4)):
+            reasons[why] = reasons.get(why, 0) + int(n)
+    if not windows:
+        return None
+    return {'windows': windows, 'ticks': ticks, 'landing_ticks': landing_ticks,
+            'landing_share': round(landing_ticks / ticks, 3), 'landings': lands, 'splits': splits,
+            'reasons': dict(sorted(reasons.items(), key=lambda kv: -kv[1]))}
+
+
+def problems(lines):
+    """How many log lines show each problem of PROBLEMS (only those that appear)."""
+    counts = {key: sum(text in l for l in lines) for key, text in PROBLEMS.items()}
+    return {k: n for k, n in counts.items() if n}
+
+
+def harden_toml(text, bots_via=False):
+    """A server.toml for a run on a copy of a real server: listening on 127.0.0.1 only (unless the bots come from
+    another machine), automatic backups off, offline mode, no web panel, and no Discord webhook (a copied
+    server.toml could carry one: the whole [discord] table goes)."""
+    if not bots_via:
+        text = text.replace('bind = ""', 'bind = "127.0.0.1"', 1)
+    text = re.sub(r'(?ms)(^\[backups\]$.*?^every = )"[^"]*"', r'\1"0"', text)
+    text = re.sub(r'(?m)^online_mode = \w+', 'online_mode = false', text)
+    text = re.sub(r'(?ms)^\[discord\]\n.*?(?=^\[|\Z)', '', text)
+    return text
+
+
+def copy_world(source, target):
+    """A copy of the world folder `source` at `target` (copy-on-write where the file system has it), without its
+    session lock. Returns the seconds it took."""
+    source = Path(source)
+    if not (source / 'level.dat').is_file():
+        raise RuntimeError(f'{source} is not a world folder (no level.dat)')
+    started = time.time()
+    subprocess.run(['cp', '-a', '--reflink=auto', str(source), str(target)], check=True)
+    (target / 'session.lock').unlink(missing_ok=True)
+    return round(time.time() - started, 1)
+
+
+def wait_ready(bot_lines, bots, timeout, process):
+    """Waits until the bots' per-second line says every bot is online and holds its chunks; returns when (seconds
+    it waited). Raises when they don't within `timeout`, or when the bots stop."""
+    started = time.time()
+    while time.time() - started < timeout:
+        for line in reversed(list(bot_lines)[-3:]):
+            try:
+                sample = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(sample, dict) and 'ready' in sample:
+                if sample.get('ready', 0) >= bots:
+                    return round(time.time() - started, 1)
+                break
+        if process.poll() is not None:
+            raise RuntimeError('the bots stopped before they held their chunks')
+        time.sleep(1)
+    raise RuntimeError(f'the bots did not all hold their chunks within {timeout} s')
+
+
 def server_command(kind, directory, args):
     java = ['java', f'-Xms{args.heap}', f'-Xmx{args.heap}', '-Duser.timezone=UTC']
     if kind == 'vanilla':
@@ -393,6 +495,8 @@ def server_command(kind, directory, args):
     subprocess.run([server, '--dir', directory, 'import', directory / 'server.properties'], check=True,
                    capture_output=True)
     toml = directory / 'server.toml'
+    if getattr(args, 'world', None):
+        toml.write_text(harden_toml(toml.read_text(), bool(args.bots_via)))
     # The same settings, without the web panel.
     toml.write_text(re.sub(r'(?m)^bind = "127\.0\.0\.1:8130"', 'bind = ""', toml.read_text()))
     if args.anticheat:
@@ -407,7 +511,7 @@ def server_command(kind, directory, args):
     if args.dab:
         # Mob AI far from players (docs/hosting.md): the defaults of Pufferfish's DAB.
         toml.write_text(toml.read_text() + '\n[entities]\ndab = true\n')
-    if args.regions:
+    if getattr(args, 'regions_on', False):
         # Region ticking (docs/hosting.md, "Regions"), with its default deadline.
         toml.write_text(toml.read_text() + '\n[regions]\nenabled = true\n')
     return [server, '--dir', directory, 'run']
@@ -495,23 +599,49 @@ def stopped_lines(lines):
     return out
 
 
-def run_once(kind, bots, behaviour, args, out):
-    name = f'{kind}-{behaviour}-{bots}'
+def run_once(kind, bots, behaviour, args, out, regions=None):
+    """One run. `regions` is None for a server without the setting (or when --regions is plain on or off), else
+    True or False, the side of a `--regions alternate` pair."""
+    label = kind if regions is None else f'{kind}-regions-{"on" if regions else "off"}'
+    args.regions_on = args.regions == 'on' if regions is None else regions
+    name = f'{label}-{behaviour}-{bots}'
     directory = out / name
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True)
     port = args.port = lab.free_port()
-    props = dict(PROPERTIES, **{'server-port': str(port), 'level-seed': str(args.seed)})
+    view = str(args.view or PROPERTIES['view-distance'])
+    props = dict(PROPERTIES, **{'server-port': str(port), 'level-seed': str(args.seed),
+                                'view-distance': view, 'simulation-distance': view})
     if args.ground:
         props.update({'level-type': 'minecraft\\:flat', 'generate-structures': 'false', 'gamemode': 'survival'})
+    if behaviour in ('roam', 'stand'):
+        # On foot: survival, and the server lets a bot hold its height.
+        props.update({'gamemode': 'survival', 'allow-flight': 'true'})
     (directory / 'server.properties').write_text(''.join(f'{k}={v}\n' for k, v in props.items()))
     (directory / 'eula.txt').write_text('eula=true\n')
+    result = {'server': label, 'bots': bots, 'behaviour': behaviour}
+    if args.world:
+        # A fresh copy of the world every run; the copy is deleted when the run is over.
+        try:
+            if kind != 'horizon':
+                raise RuntimeError('--world is for the Horizon server')
+            result['world_copy_seconds'] = copy_world(args.world, directory / 'world')
+            if args.clone_players:
+                cloned = world_players.assign(directory / 'world', bots)
+                result['players_cloned'] = len(cloned)
+                dims = {}
+                for entry in cloned.values():
+                    dims[entry['dim']] = dims.get(entry['dim'], 0) + 1
+                result['player_dimensions'] = dims
+        except (RuntimeError, OSError, subprocess.CalledProcessError, SystemExit) as e:
+            result['error'] = f'the world copy: {e}'
+            shutil.rmtree(directory / 'world', ignore_errors=True)
+            return result
     command = server_command(kind, directory, args)
     if args.nice:
         command = ['nice', '-n', str(args.nice), *command]
     started = time.time()
     server = Server(command, directory, out / f'{name}.log')
-    result = {'server': kind, 'bots': bots, 'behaviour': behaviour}
     try:
         server.wait_for(PUMPKIN_READY if kind == 'pumpkin' else DONE, 600)
         result['start_seconds'] = round(time.time() - started, 2)
@@ -528,27 +658,30 @@ def run_once(kind, bots, behaviour, args, out):
                 server.console(f'summon {kind} {x} 100 {z} {{PersistenceRequired:1b}}')
         time.sleep(5)
         report = out / f'{name}-bots.json'
-        total = bots * args.join_every + args.warmup + args.seconds + (200 if os.environ.get('HORIZON_BENCH_GRID') else 0)
+        gate = bool(bots and (args.world or args.wait_ready))
+        total = (bots * args.join_every + (args.ready_timeout if gate else 0) + args.warmup + args.seconds
+                 + (200 if os.environ.get('HORIZON_BENCH_GRID') else 0))
         # The summary comes back on stdout after the per-second lines, so it works over ssh too.
         # No bots: the idle server, measured the same way.
         bot_process = subprocess.Popen(['true'] if bots == 0 else [
              *bots_command(args), '--server', f'{args.connect}:{port}', '--bots', str(bots),
              '--behaviour', behaviour, '--join-every', str(args.join_every), '--seconds', str(int(total)),
-             '--seed', str(args.seed), '--report', '-',
+             '--seed', str(args.seed), '--report', '-', '--stdin-stop', '--view-distance', view,
              *(['--explore-speed', str(args.explore_speed)] if args.explore_speed else []),
              *(['--height', '0', '--ground'] if args.ground else []),
              *(['--chat-every', str(args.chat_every)] if args.chat_every else []),
              *(['--capture', str(args.capture)] if args.capture else [])],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         bot_lines = []
         threading.Thread(target=lambda: bot_lines.extend(bot_process.stdout), daemon=True).start()
-        # All bots in, then the warm-up.
+        # All bots in, then the warm-up: after every bot holds its chunks, when it matters (a real world's chunks
+        # come off the disk, so the first minutes are loading, not the work being measured).
+        time.sleep(bots * args.join_every)
+        if gate:
+            result['load_seconds'] = wait_ready(bot_lines, bots, args.ready_timeout, bot_process)
         if args.entities:
-            time.sleep(bots * args.join_every)
             populate(server, args.entities, args.seed)
-            time.sleep(args.warmup)
-        else:
-            time.sleep(bots * args.join_every + args.warmup)
+        time.sleep(args.warmup)
         grid = int(os.environ.get('HORIZON_BENCH_GRID', '0'))
         if grid:
             # Static players far enough apart to be regions of their own: a grid, one bot to a cell.
@@ -562,6 +695,7 @@ def run_once(kind, bots, behaviour, args, out):
             time.sleep(2)
         profiling = start_profile(server, kind, args)
         measure_start = time.time()
+        measure_lines = server.count()
         rss, cpu, ticks = [], [], []
         _, last_cpu = tree_usage(server.process.pid)
         last_time = time.time()
@@ -577,6 +711,12 @@ def run_once(kind, bots, behaviour, args, out):
                 if (t := tick_query(server)) is not None:
                     ticks.append(t)
                 next_query = now + 5
+        # The bots end on their own at `total`; a run that gated on their chunks ends them here instead.
+        try:
+            bot_process.stdin.write('stop\n')
+            bot_process.stdin.flush()
+        except (BrokenPipeError, ValueError, OSError):
+            pass
         bot_process.wait(timeout=total + 120)
         time.sleep(0.5)
         measured, rest = [], []
@@ -630,8 +770,14 @@ def run_once(kind, bots, behaviour, args, out):
             'tick_queries': len(ticks),
             # With --regions: the server's own profile of its region ticking, one line a 200 ticks (landing
             # ticks, why regions came home, where the tick time goes).
-            **({'regions_profile': [l for l in server.since(0) if 'regions: wait' in l][-6:]} if args.regions else {}),
+            **({'regions_profile': [l for l in server.since(0) if 'regions: wait' in l][-6:]} if args.regions_on else {}),
         })
+        if args.regions_on:
+            # Landing ticks and the reasons, over the measure window only.
+            result['landings'] = region_landings(server.since(measure_lines))
+        result['regions'] = args.regions_on
+        if found := problems(server.since(0)):
+            result['problems'] = found
         if profiling:
             finish_profile(server, directory, result)
         # A game that stopped was started again by the supervisor: what was measured after it is an empty
@@ -642,6 +788,8 @@ def run_once(kind, bots, behaviour, args, out):
         result['error'] = str(e)
     finally:
         server.stop()
+        if args.world:
+            shutil.rmtree(directory / 'world', ignore_errors=True)
     return result
 
 
@@ -675,6 +823,34 @@ def work(runs):
             row['servers'][r['server']]['waited_ticks_per_second'] = r.get('waited_ticks_per_second')
         rows.append(row)
     return rows
+
+
+def sides(kind, regions, round_):
+    """The runs one server makes in a round: one, or with `--regions alternate` the two of Horizon (None: the
+    setting doesn't apply). Regions off goes first in even rounds, on first in odd ones."""
+    if kind != 'horizon' or regions != 'alternate':
+        return [None]
+    return [False, True] if round_ % 2 == 0 else [True, False]
+
+
+def regions_summary(runs):
+    """One line per run that loaded a world or ticked by regions: copy and load time, landing ticks and why."""
+    lines = []
+    for r in runs:
+        if 'error' in r or not (r.get('load_seconds') is not None or r.get('landings') or r.get('problems')):
+            continue
+        parts = [f'{r["server"]} {r["behaviour"]} {r["bots"]} round {r.get("round", 0)}:']
+        if r.get('load_seconds') is not None:
+            parts.append(f'copy {r.get("world_copy_seconds")} s, bots held their chunks after {r["load_seconds"]} s')
+        landings = r.get('landings')
+        if landings:
+            why = ', '.join(f'{k} {v}' for k, v in landings['reasons'].items()) or 'none'
+            parts.append(f'landing ticks {landings["landing_ticks"]}/{landings["ticks"]} ({landings["landing_share"]:.0%}), '
+                         f'{landings["landings"]} landings, {landings["splits"]} splits; reasons: {why}')
+        if r.get('problems'):
+            parts.append('PROBLEMS ' + json.dumps(r['problems']))
+        lines.append(' '.join(parts))
+    return lines
 
 
 def versions(kinds):
@@ -716,9 +892,24 @@ def main():
                         help='summon this many mobs ~100 blocks from the spawn, away from the bots (the DAB fixture)')
     parser.add_argument('--anticheat', action='store_true',
                         help="turn Horizon's anticheat on (server.toml [anticheat]); its flags are counted")
-    parser.add_argument('--regions', action='store_true',
-                        help="tick the world by regions (server.toml [regions] enabled); Horizon only. With "
-                             'HORIZON_BENCH_GRID=500 every bot stands in a region of its own')
+    parser.add_argument('--regions', nargs='?', const='on', default='off', choices=['on', 'off', 'alternate'],
+                        help="tick the world by regions (server.toml [regions] enabled); Horizon only. 'alternate' "
+                             'runs regions off and on, one after the other (the other way round every second '
+                             '--repeat round). With HORIZON_BENCH_GRID=500 every bot stands in a region of its own')
+    parser.add_argument('--world', type=Path, default=None, metavar='DIR',
+                        help='a world folder (it holds level.dat): every run gets a fresh copy of it, deleted after the '
+                             'run; the original is never written. Horizon only')
+    parser.add_argument('--clone-players', action='store_true',
+                        help="with --world: Bot0..BotN-1 get the saved data of the world's N most recently active "
+                             'players (tools/world_players.py), to start where those players were')
+    parser.add_argument('--wait-ready', action='store_true',
+                        help='start the warm-up only once every bot holds the chunks round it (always with --world)')
+    parser.add_argument('--ready-timeout', type=int, default=900,
+                        help='seconds the bots get to hold their chunks (their join time not counted); the run '
+                             'fails when they do not')
+    parser.add_argument('--view', type=int, default=0,
+                        help='view and simulation distance of the server and the bots (default 10, or '
+                             'HORIZON_BENCH_VIEW)')
     parser.add_argument('--ground', action='store_true',
                         help='a flat survival world, the bots walking on its ground and saying so in every move '
                              "(what the anticheat's ground check judges)")
@@ -736,15 +927,19 @@ def main():
     out = lab.LOCAL / 'server-bench'
     out.mkdir(parents=True, exist_ok=True)
     runs = []
+    if args.clone_players and not args.world:
+        parser.error('--clone-players needs --world')
     for round_ in range(args.repeat):
         for behaviour in args.behaviour.split(','):
             for bots in [int(b) for b in args.bots.split(',')]:
                 for kind in args.servers.split(','):
-                    print(f'{kind}, {bots} {behaviour} bots...', flush=True)
-                    result = run_once(kind, bots, behaviour, args, out)
-                    result['round'] = round_
-                    runs.append(result)
-                    print(json.dumps(result), flush=True)
+                    for regions in sides(kind, args.regions, round_):
+                        label = kind if regions is None else f'{kind} regions {"on" if regions else "off"}'
+                        print(f'{label}, {bots} {behaviour} bots...', flush=True)
+                        result = run_once(kind, bots, behaviour, args, out, regions)
+                        result['round'] = round_
+                        runs.append(result)
+                        print(json.dumps(result), flush=True)
     report = {
         'kind': 'horizon-server-benchmark',
         'date': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds'),
@@ -761,18 +956,22 @@ def main():
     path = args.out or out / 'report.json'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2) + '\n')
-    print(f'\n{"server":8} {"pass":8} {"bots":>4} {"start s":>8} {"MSPT":>6} {"P95":>6} {"P99":>6} {"RSS MB":>7} '
+    print(f'\n{"server":20} {"pass":8} {"bots":>4} {"start s":>8} {"MSPT":>6} {"P95":>6} {"P99":>6} {"RSS MB":>7} '
           f'{"CPU %":>6} {"chunks/s":>8} {"/bot":>6} {"resent":>6} {"pulled":>6} {"joined":>6} {"join ms":>7}')
     for r in runs:
         if 'error' in r:
-            print(f'{r["server"]:8} {r["behaviour"]:8} {r["bots"]:>4}  failed: {r["error"].splitlines()[0]}')
+            print(f'{r["server"]:20} {r["behaviour"]:8} {r["bots"]:>4}  failed: {r["error"].splitlines()[0]}')
             continue
         # A mixed pass: every bot's.
         per_bot = r['chunks_per_bot'].get(r['behaviour']) or round((r['chunks_total'] or 0) / max(r['bots'], 1))
-        print(f'{r["server"]:8} {r["behaviour"]:8} {r["bots"]:>4} {r["start_seconds"]:>8} {r["mspt"]["average"]!s:>6} '
+        print(f'{r["server"]:20} {r["behaviour"]:8} {r["bots"]:>4} {r["start_seconds"]:>8} {r["mspt"]["average"]!s:>6} '
               f'{r["mspt"]["p95"]!s:>6} {r["mspt"]["p99"]!s:>6} {r["rss_mb"]["mean"]!s:>7} {r["cpu_percent"]!s:>6} '
               f'{r["chunks_per_second"]!s:>8} {per_bot!s:>6} {r["resent"]!s:>6} {r["pulled_back"]!s:>6} '
               f'{r["bots_joined"]!s:>6} {(r.get("join_ms") or {}).get("p50_ms")!s:>7}')
+    summary = regions_summary(runs)
+    if summary:
+        print(f'\nLoading and landings (landing ticks: ticks that landed or split a region, of the ticks logged):')
+        print('\n'.join(summary))
     if report['work']:
         print(f'\nWork, against the busiest server (chunks a second sent, new; ticks a second bots waited):')
         for row in report['work']:
