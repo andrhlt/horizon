@@ -739,11 +739,7 @@ impl Game<'_> {
         self.ensure_datapacks();
         self.fns.load_pending
             || !self.fns.store.tag_functions("minecraft:tick").is_empty()
-            || self
-                .fns
-                .schedule
-                .iter()
-                .any(|e| e.time <= self.world.game_time + 1)
+            || self.fns.schedule.has_due(self.world.game_time + 1)
     }
     /// `ServerFunctionManager.tick`: the `#minecraft:load` functions after a
     /// reload, then the `#minecraft:tick` ones, before the levels tick (and
