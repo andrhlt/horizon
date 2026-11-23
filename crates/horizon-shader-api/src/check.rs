@@ -1529,6 +1529,11 @@ fn kind_name(kind: &OptionKind) -> &'static str {
     }
 }
 
+/// Counts expressions and texture reads across all functions and entry points in `module`.
+pub fn module_cost(module: &naga::Module) -> (usize, usize) {
+    cost(module)
+}
+
 fn cost(module: &naga::Module) -> (usize, usize) {
     let functions = module
         .functions
@@ -1634,6 +1639,95 @@ fn overridden(module: &naga::Module) -> (naga::Module, ModuleInfo) {
     (module, info)
 }
 
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "internal error".to_owned()
+    }
+}
+
+fn run_backend<T, E: fmt::Display>(f: impl FnOnce() -> Result<T, E>) -> Option<String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(_)) => None,
+        Ok(Err(e)) => Some(e.to_string()),
+        Err(payload) => Some(format!("translator panicked: {}", panic_message(payload))),
+    }
+}
+
+fn translate_entry_backends(
+    m: &naga::Module,
+    i: &ModuleInfo,
+    stage: naga::ShaderStage,
+    entry_point: &str,
+    metal: (u8, u8),
+) -> [(&'static str, Option<String>); 3] {
+    let spv = run_backend(|| {
+        naga::back::spv::write_vec(
+            m,
+            i,
+            &naga::back::spv::Options::default(),
+            Some(&naga::back::spv::PipelineOptions {
+                shader_stage: stage,
+                entry_point: entry_point.to_owned(),
+            }),
+        )
+    });
+    let msl = run_backend(|| {
+        naga::back::msl::write_string(
+            m,
+            i,
+            &naga::back::msl::Options {
+                lang_version: metal,
+                ..Default::default()
+            },
+            &naga::back::msl::PipelineOptions {
+                entry_point: Some((stage, entry_point.to_owned())),
+                ..Default::default()
+            },
+        )
+    });
+    let hlsl = run_backend(|| {
+        let mut out = String::new();
+        naga::back::hlsl::Writer::new(
+            &mut out,
+            &naga::back::hlsl::Options::default(),
+            &naga::back::hlsl::PipelineOptions {
+                entry_point: Some((stage, entry_point.to_owned())),
+            },
+        )
+        .write(m, i, None)
+    });
+    [
+        ("Vulkan (SPIR-V)", spv),
+        ("Metal", msl),
+        ("DirectX 12 (HLSL)", hlsl),
+    ]
+}
+
+/// Translates every entry point of a validated `module` for Vulkan (SPIR-V), Metal (MSL),
+/// and DirectX 12 (HLSL), catching backend writer panics as refusal messages.
+pub fn translate_backends(
+    module: &naga::Module,
+    info: &ModuleInfo,
+    metal: (u8, u8),
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for e in &module.entry_points {
+        for (backend, err) in translate_entry_backends(module, info, e.stage, &e.name, metal) {
+            if let Some(err) = err {
+                errors.push(format!("{backend} refuses it: {err}"));
+            }
+        }
+        if !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+    }
+    Ok(())
+}
+
 /// Translates every entry point for Vulkan (SPIR-V), Metal and DirectX 12
 /// (HLSL) with each option set, as wgpu does when it builds the pipelines; Metal's shading
 /// language at the version `metal`. A stage the game has `joined` to its own shader is taken with
@@ -1690,45 +1784,7 @@ fn translate(
                     return problems;
                 }
             };
-            let spv = naga::back::spv::write_vec(
-                &m,
-                &i,
-                &naga::back::spv::Options::default(),
-                Some(&naga::back::spv::PipelineOptions {
-                    shader_stage: e.stage,
-                    entry_point: e.name.clone(),
-                }),
-            );
-            let msl = naga::back::msl::write_string(
-                &m,
-                &i,
-                &naga::back::msl::Options {
-                    lang_version: metal,
-                    ..Default::default()
-                },
-                &naga::back::msl::PipelineOptions {
-                    entry_point: Some((e.stage, e.name.clone())),
-                    ..Default::default()
-                },
-            );
-            let mut hlsl = String::new();
-            let hlsl_result = naga::back::hlsl::Writer::new(
-                &mut hlsl,
-                &naga::back::hlsl::Options::default(),
-                &naga::back::hlsl::PipelineOptions {
-                    entry_point: Some((e.stage, e.name.clone())),
-                },
-            )
-            .write(&m, &i, None);
-            let errors = [
-                ("Vulkan (SPIR-V)", spv.err().map(|e| e.to_string())),
-                ("Metal", msl.err().map(|e| e.to_string())),
-                (
-                    "DirectX 12 (HLSL)",
-                    hlsl_result.err().map(|e| e.to_string()),
-                ),
-            ];
-            for (backend, err) in errors {
+            for (backend, err) in translate_entry_backends(&m, &i, e.stage, &e.name, metal) {
                 if let Some(err) = err {
                     problems.push(fail(backend, err));
                 }
@@ -1739,4 +1795,15 @@ fn translate(
         }
     }
     problems
+}
+
+#[cfg(test)]
+#[test]
+fn backend_writer_panics_are_caught_as_refusals() {
+    let err = run_backend::<(), &str>(|| panic!("simulated backend ICE"))
+        .expect("panic should produce a refusal message");
+    assert!(
+        err.contains("translator panicked") && err.contains("simulated backend ICE"),
+        "{err}"
+    );
 }

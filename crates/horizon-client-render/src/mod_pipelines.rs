@@ -391,30 +391,81 @@ pub fn compose_with(text: &str, textured: bool) -> Result<String, String> {
         located(at, message)
     })?;
     for (_, function) in module.functions.iter() {
-        if function.expressions.iter().any(|(_, expression)| matches!(expression,
-            naga::Expression::GlobalVariable(handle) if module.global_variables[*handle].name.as_deref() == Some("horizon_pipeline_view"))) {
-            return Err("horizon_pipeline_view is vertex-only".into());
+        if let Some((expr_handle, _)) = function.expressions.iter().find(|(_, expression)| {
+            matches!(
+                expression,
+                naga::Expression::GlobalVariable(handle)
+                    if module.global_variables[*handle].name.as_deref() == Some("horizon_pipeline_view")
+            )
+        }) {
+            let at = function
+                .expressions
+                .get_span(expr_handle)
+                .to_range()
+                .map(|range| range.start);
+            return Err(located(at, "horizon_pipeline_view is vertex-only".into()));
         }
     }
-    if !module.overrides.is_empty() {
-        return Err("override declarations are not supported".into());
+    if let Some((handle, _)) = module.overrides.iter().next() {
+        let at = module
+            .overrides
+            .get_span(handle)
+            .to_range()
+            .map(|range| range.start);
+        return Err(located(
+            at,
+            "override declarations are not supported".into(),
+        ));
     }
-    signature(&module)?;
-    if !module.entry_points.is_empty() {
-        return Err("it declares an entry point; the game supplies both stages".into());
+    signature(&module).map_err(|(at, message)| located(at, message))?;
+    if let Some(entry) = module.entry_points.first() {
+        let at = entry
+            .function
+            .body
+            .span_iter()
+            .next()
+            .and_then(|(_, span)| span.to_range())
+            .map(|range| range.start);
+        return Err(located(
+            at,
+            "it declares an entry point; the game supplies both stages".into(),
+        ));
     }
+    let expected_bindings = if textured { 5 } else { 2 };
     if module
         .global_variables
         .iter()
         .filter(|(_, variable)| variable.binding.is_some())
         .count()
-        != if textured { 5 } else { 2 }
+        != expected_bindings
     {
-        return Err("it declares a binding; a pipeline reads only `frame` and its input".into());
+        let at = module
+            .global_variables
+            .iter()
+            .filter(|(_, variable)| variable.binding.is_some())
+            .find_map(|(handle, _)| {
+                module
+                    .global_variables
+                    .get_span(handle)
+                    .to_range()
+                    .map(|range| range.start)
+                    .filter(|&start| start >= prelude.len())
+            });
+        return Err(located(
+            at,
+            "it declares a binding; a pipeline reads only `frame` and its input".into(),
+        ));
     }
     shader.push_str(ENTRIES);
-    let module = naga::front::wgsl::parse_str(&shader).map_err(|e| e.message().to_owned())?;
-    Validator::new(ValidationFlags::all(), Capabilities::default())
+    let module = naga::front::wgsl::parse_str(&shader).map_err(|e| {
+        let at = e
+            .labels()
+            .next()
+            .and_then(|(span, _)| span.to_range())
+            .map(|range| range.start);
+        located(at, e.message().to_owned())
+    })?;
+    let info = Validator::new(ValidationFlags::all(), Capabilities::default())
         .validate(&module)
         .map_err(|e| {
             let at = e
@@ -430,17 +481,31 @@ pub fn compose_with(text: &str, textured: bool) -> Result<String, String> {
             }
             located(at, message)
         })?;
+    let (expressions, texture_reads) = horizon_shader_api::check::module_cost(&module);
+    if expressions > horizon_shader_api::check::MAX_EXPRESSIONS {
+        return Err(format!(
+            "{expressions} expressions; a pipeline shader may hold {}",
+            horizon_shader_api::check::MAX_EXPRESSIONS
+        ));
+    }
+    if texture_reads > horizon_shader_api::check::MAX_TEXTURE_READS {
+        return Err(format!(
+            "{texture_reads} texture reads; a pipeline shader may write {}",
+            horizon_shader_api::check::MAX_TEXTURE_READS
+        ));
+    }
+    horizon_shader_api::check::translate_backends(&module, &info, (2, 2))?;
     Ok(shader)
 }
 
 /// `fn pipeline_fragment(input: PipelineInput) -> vec4<f32>`, or what the file has instead.
-fn signature(module: &naga::Module) -> Result<(), String> {
+fn signature(module: &naga::Module) -> Result<(), (Option<usize>, String)> {
     let expected = format!("expected `fn {FUNCTION}(input: PipelineInput) -> vec4<f32>`");
-    let (_, function) = module
+    let (handle, function) = module
         .functions
         .iter()
         .find(|(_, function)| function.name.as_deref() == Some(FUNCTION))
-        .ok_or_else(|| format!("no function `{FUNCTION}`: {expected}"))?;
+        .ok_or_else(|| (None, format!("no function `{FUNCTION}`: {expected}")))?;
     let takes_input = matches!(
         function.arguments.as_slice(),
         [argument] if module.types[argument.ty].name.as_deref() == Some("PipelineInput")
@@ -457,7 +522,15 @@ fn signature(module: &naga::Module) -> Result<(), String> {
     if takes_input && returns_color {
         Ok(())
     } else {
-        Err(format!("`{FUNCTION}` has another signature: {expected}"))
+        let at = module
+            .functions
+            .get_span(handle)
+            .to_range()
+            .map(|range| range.start);
+        Err((
+            at,
+            format!("`{FUNCTION}` has another signature: {expected}"),
+        ))
     }
 }
 
@@ -759,5 +832,80 @@ fn pipeline_fragment(input: PipelineInput) -> vec4<f32> { return pipeline_textur
                 "{u}"
             );
         }
+    }
+
+    #[test]
+    fn over_cap_shaders_are_refused() {
+        // Exceed MAX_EXPRESSIONS (20_000): each `x = x + 1.0;` emits multiple naga expressions.
+        let mut big = String::from(
+            "fn pipeline_fragment(input: PipelineInput) -> vec4<f32> {\n    var x = input.color.r;\n",
+        );
+        for _ in 0..7_000 {
+            big.push_str("    x = x + 1.0;\n");
+        }
+        big.push_str("    return vec4<f32>(x, input.color.gba);\n}\n");
+        let err = compose(&big).unwrap_err();
+        assert!(
+            err.contains("expressions")
+                && err.contains(&horizon_shader_api::check::MAX_EXPRESSIONS.to_string()),
+            "{err}"
+        );
+
+        // Exceed MAX_TEXTURE_READS (64): 65 direct texture samples on the pipeline's texture.
+        let mut many_reads = String::from(
+            "fn pipeline_fragment(input: PipelineInput) -> vec4<f32> {\n    var acc = vec4<f32>(0.0);\n",
+        );
+        for _ in 0..=horizon_shader_api::check::MAX_TEXTURE_READS {
+            many_reads.push_str(
+                "    acc += textureSample(horizon_pipeline_texture, horizon_pipeline_sampler, input.uv);\n",
+            );
+        }
+        many_reads.push_str("    return acc;\n}\n");
+        let err = compose_with(&many_reads, true).unwrap_err();
+        assert!(
+            err.contains("texture reads")
+                && err.contains(&horizon_shader_api::check::MAX_TEXTURE_READS.to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn semantic_refusals_report_the_files_own_line() {
+        let view = "// header\nfn pipeline_fragment(input: PipelineInput) -> vec4<f32> {\n    return horizon_pipeline_view * input.color;\n}\n";
+        let err = compose(view).unwrap_err();
+        assert!(
+            err.starts_with("line 3:") && err.contains("horizon_pipeline_view"),
+            "{err}"
+        );
+
+        let ov = "// header\n\noverride strength: f32 = 1.0;\nfn pipeline_fragment(input: PipelineInput) -> vec4<f32> {\n    return input.color * strength;\n}\n";
+        let err = compose(ov).unwrap_err();
+        assert!(
+            err.starts_with("line 3:") && err.contains("override"),
+            "{err}"
+        );
+
+        let sig = "// header\nfn pipeline_fragment(uv: vec2<f32>) -> vec4<f32> {\n    return vec4<f32>(1.0);\n}\n";
+        let err = compose(sig).unwrap_err();
+        assert!(
+            err.starts_with("line 2:") && err.contains("another signature"),
+            "{err}"
+        );
+
+        let binding = "// header\n@group(0) @binding(2) var<uniform> mine: vec4<f32>;\nfn pipeline_fragment(input: PipelineInput) -> vec4<f32> {\n    return input.color * mine;\n}\n";
+        let err = compose(binding).unwrap_err();
+        assert!(
+            err.starts_with("line 2:") && err.contains("declares a binding"),
+            "{err}"
+        );
+
+        let entry = format!(
+            "{GLOW}\n@fragment fn mine() -> @location(0) vec4<f32> {{\n    return vec4<f32>(1.0);\n}}\n"
+        );
+        let err = compose(&entry).unwrap_err();
+        assert!(
+            err.starts_with("line 6:") && err.contains("declares an entry point"),
+            "{err}"
+        );
     }
 }
