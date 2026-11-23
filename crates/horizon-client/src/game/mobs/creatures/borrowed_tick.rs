@@ -392,12 +392,13 @@ impl Game<'_> {
                         None => base.player_identity,
                         Some(conn) => self.guest_identity(conn),
                     };
-                    // A listener can redirect to any real player in this level. Keep
-                    // immutable views for this tick so changing selection never
-                    // invalidates a view a goal already borrowed. No allocation is
-                    // made when nobody listens for target changes.
+                    // Native goals and target listeners can redirect or resolve any real
+                    // player in this level. Keep immutable views for this tick so changing
+                    // selection never invalidates a view a goal already borrowed.
                     let selection =
-                        if mod_api::__private::listened(mod_api::HookId::LivingChangeTarget) {
+                        if base.goal_host.is_some()
+                            || mod_api::__private::listened(mod_api::HookId::LivingChangeTarget)
+                        {
                             use horizon_client::mobs::player_selection::{
                                 PlayerSelection, TickPlayer,
                             };

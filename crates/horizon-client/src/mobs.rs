@@ -3363,6 +3363,17 @@ impl MobWorld<'_> {
         }
     }
 
+    /// A real player in this tick's level by UUID, including a remote player
+    /// that is not the one currently selected for this mob.
+    pub fn player_by_uuid(&self, uuid: [i32; 4]) -> Option<&PlayerView> {
+        if let Some(selection) = self.player_selection
+            && let Some(player) = selection.by_uuid(uuid)
+        {
+            return Some(&player.view);
+        }
+        self.player.as_ref().filter(|player| player.uuid == uuid)
+    }
+
     /// Capture a player-directed event's recipient after a listener switches
     /// the selected player. Before the first switch retain the plain event and
     /// the existing allocation-free routing path.
