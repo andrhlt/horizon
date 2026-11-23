@@ -122,6 +122,11 @@ pub struct World {
     player_edit_depth: u32,
     /// Chunks whose light must be recomputed.
     pub dirty_light: crate::fast_hash::FxHashSet<(i32, i32)>,
+    /// Chunks where a block edit was lit while a chunk next to them was not in this world (the edge of a region's
+    /// part of the level): the light the edit sent that way was not applied. When the world gets the missing
+    /// chunk (the region merges with its neighbour or comes home), the chunks around are lit again
+    /// ([`World::take_back`]).
+    pub seam_light: crate::fast_hash::FxHashSet<(i32, i32)>,
     /// Edits on lit chunks (position, old state, new state), relit
     /// incrementally by streaming.
     pub light_edits: Vec<((i32, i32, i32), u32, u32)>,
@@ -368,6 +373,7 @@ impl World {
             immediate_sections: Default::default(),
             player_edit_depth: 0,
             dirty_light: Default::default(),
+            seam_light: Default::default(),
             light_edits: Vec::new(),
             light_checks: Default::default(),
             loaded_entities: Vec::new(),
@@ -504,6 +510,28 @@ impl World {
         }
         out
     }
+    /// The chunks that had an edit lit beside a missing chunk ([`World::seam_light`]) whose neighbours are all here
+    /// now are lit again with their neighbours, from the blocks as they are: the light the edit sent into the chunk
+    /// that was missing is there. Those still beside a gap wait.
+    fn light_the_seams(&mut self) {
+        let chunks = &self.chunks;
+        self.seam_light.retain(|c| chunks.contains_key(c));
+        let mut ready = Vec::new();
+        self.seam_light.retain(|&(x, z)| {
+            let whole = (-1..=1).all(|dz| (-1..=1).all(|dx| chunks.contains_key(&(x + dx, z + dz))));
+            if whole {
+                ready.push((x, z));
+            }
+            !whole
+        });
+        for (x, z) in ready {
+            for dz in -1..=1 {
+                for dx in -1..=1 {
+                    self.dirty_light.insert((x + dx, z + dz));
+                }
+            }
+        }
+    }
     /// An empty world with this one's level-wide values (shape, time, weather, rules), to stand in its place
     /// while a region's world is in use: whatever reads the level's time or weather meanwhile reads the same.
     pub fn stand_in(&self) -> World {
@@ -528,6 +556,7 @@ impl World {
             lent_revision,
             dirty_sections,
             dirty_light,
+            seam_light,
             light_edits,
             modified,
             block_entities,
@@ -564,6 +593,8 @@ impl World {
             self.dirty_sections.insert_column_mask((x, z), mask);
         }
         self.dirty_light.extend(dirty_light);
+        self.seam_light.extend(seam_light);
+        self.light_the_seams();
         self.light_edits.extend(light_edits);
         self.modified.extend(modified.iter().copied());
         self.chest_openers.extend(chest_openers);
@@ -1382,6 +1413,37 @@ mod region_tests {
     use super::*;
     use crate::chunk::Chunk;
     use std::sync::Arc;
+
+    /// An edit lit at the edge of a region's part of the level, beside a chunk another region holds, sent light
+    /// that way that was not applied. When the chunk comes into the world, the chunks around the edit are lit
+    /// again; an edit still beside a gap waits for the chunk it lacks.
+    #[test]
+    fn light_from_an_edit_beside_a_gap_is_redone_when_the_chunk_beside_it_arrives() {
+        let mut region = World::new(BlockStateId(0), 1);
+        for x in 0..2 {
+            region.chunks.insert((x, 0), Arc::new(Chunk::empty(x, 0)));
+        }
+        // Chunk 1's edit had no chunk 2 to light; chunk 0's edit had no chunk -1 either, and still has none.
+        region.seam_light.insert((1, 0));
+        region.seam_light.insert((0, 0));
+        let mut next = World::new(BlockStateId(0), 1);
+        next.chunks.insert((2, 0), Arc::new(Chunk::empty(2, 0)));
+        for z in [-1, 1] {
+            for x in 0..3 {
+                region.chunks.insert((x, z), Arc::new(Chunk::empty(x, z)));
+            }
+        }
+        region.take_back(next);
+        // Chunk 1's 3 x 3 is whole now: it and its neighbours are lit again.
+        for x in 0..3 {
+            for z in -1..=1 {
+                assert!(region.dirty_light.contains(&(x, z)), "{x},{z}");
+            }
+        }
+        assert!(!region.seam_light.contains(&(1, 0)));
+        // Chunk 0 still lacks chunk -1: it waits.
+        assert!(region.seam_light.contains(&(0, 0)));
+    }
 
     /// Two regions' worlds go out with their chunks and per-chunk records, log what their ticks changed, and
     /// everything comes back to the one world.

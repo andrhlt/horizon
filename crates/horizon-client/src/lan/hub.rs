@@ -552,9 +552,6 @@ pub struct Hub {
     /// The players whose region keeps them on its thread between ticks: their packets and leaves wait in
     /// `away_events` for it (a resident region, `regions.rs`).
     pub away: std::collections::HashSet<u32>,
-    /// Where those players stand, by level: the chunks the server keeps loaded for them in that level (and
-    /// only there: a level's players away in a region say nothing of another level's streaming).
-    pub away_places: std::collections::HashMap<String, Vec<(i32, i32)>>,
     away_events: Vec<(NetEvent, crate::net::ingress::ReceiveLease<NetEvent>)>,
     /// This is a region's hub (`region_shell`): the chat lines its players said are kept in `region_chat_out`.
     pub region_shell: bool,
@@ -1092,7 +1089,6 @@ impl Hub {
             item_ids: Default::default(),
             entity_types: Default::default(),
             away: Default::default(),
-            away_places: std::collections::HashMap::new(),
             away_sleep: (0, 0, 0),
             wake_request: false,
             away_events: Vec::new(),
@@ -1424,13 +1420,6 @@ impl Hub {
             .simulation_iter()
             .filter(move |g| self.watches(g) && loads(g))
             .map(Guest::chunk)
-            .chain(
-                self.away_places
-                    .get(&self.config.dimension)
-                    .into_iter()
-                    .flatten()
-                    .copied(),
-            )
     }
     /// `PlayerList.broadcastAll(packet, dimension)`: the players in the level in place.
     pub fn broadcast_level(&self, packet: &C) {

@@ -2673,7 +2673,7 @@ impl Game<'_> {
                 tick_steps: self.clock.step_state(),
                 collision: Some(self.collision),
                 border: &self.border,
-                streaming: (!self.regions.worker).then_some(&self.streaming),
+                streaming: Some(&self.streaming),
             };
             host.hub.movement_checks = (
                 self.ui
@@ -3017,7 +3017,7 @@ impl Game<'_> {
                     tick_steps: self.clock.step_state(),
                     collision: Some(self.collision),
                     border: &self.border,
-                    streaming: (!self.regions.worker).then_some(&self.streaming),
+                    streaming: Some(&self.streaming),
                 };
                 host.hub.movement_checks = (
                     self.ui
@@ -3284,7 +3284,7 @@ impl Game<'_> {
             tick_steps: self.clock.step_state(),
             collision: Some(self.collision),
             border: &self.border,
-            streaming: (!self.regions.worker).then_some(&self.streaming),
+            streaming: Some(&self.streaming),
         };
         let Some(host) = self.lan.as_mut() else {
             return;

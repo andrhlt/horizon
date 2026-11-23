@@ -66,6 +66,8 @@ pub(super) struct TickProfile {
     resident: bool,
     /// Why regions came home, by reason, this window.
     reasons: Vec<(&'static str, u32)>,
+    /// The same since the server started: what a test reads.
+    reasons_total: Vec<(&'static str, u32)>,
     /// Ticks this window that landed regions, and ticks that split the level.
     lands: u32,
     splits: u32,
@@ -92,10 +94,21 @@ impl TickProfile {
 
     /// Notes why regions come home this tick.
     pub fn landed_because(&mut self, why: &'static str) {
-        match self.reasons.iter_mut().find(|r| r.0 == why) {
-            Some(r) => r.1 += 1,
-            None => self.reasons.push((why, 1)),
+        for list in [&mut self.reasons, &mut self.reasons_total] {
+            match list.iter_mut().find(|r| r.0 == why) {
+                Some(r) => r.1 += 1,
+                None => list.push((why, 1)),
+            }
         }
+    }
+
+    /// How many times regions came home for `why` since the server started.
+    #[cfg(test)]
+    pub fn landed_for(&self, why: &str) -> u32 {
+        self.reasons_total
+            .iter()
+            .find(|r| r.0 == why)
+            .map_or(0, |r| r.1)
     }
 
     /// Notes that regions are resident this tick.

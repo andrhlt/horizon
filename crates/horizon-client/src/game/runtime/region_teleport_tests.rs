@@ -30,6 +30,8 @@ struct Seen {
     left: Option<String>,
     /// What the server said in chat, for a failure's report.
     chat: Vec<String>,
+    /// The chunks the server sent and has not told it to forget.
+    chunks: std::collections::HashSet<(i32, i32)>,
 }
 
 thread_local! {
@@ -136,6 +138,12 @@ impl Bot {
                             pitch: p.pitch,
                         }));
                     }
+                    C::LevelChunkWithLight(c) => {
+                        s.lock().unwrap().chunks.insert((c.x, c.z));
+                    }
+                    C::ForgetLevelChunk(c) => {
+                        s.lock().unwrap().chunks.remove(&(c.pos[0], c.pos[1]));
+                    }
                     C::ChunkBatchFinished(_) => {
                         send(S::ChunkBatchReceived(play::ChunkBatchReceived {
                             chunks_per_tick: 20.0,
@@ -170,6 +178,21 @@ impl Bot {
         })
         .encode();
         self.writer.lock().unwrap().send(&body).unwrap();
+    }
+
+    /// Says it stands at `(x, y, z)`: a step of a walk (the server's movement check allows a flying player this).
+    fn step_to(&self, x: f64, y: f64, z: f64) {
+        let body = S::MovePlayerPos(play::MovePlayerPos {
+            x,
+            y,
+            z,
+            flags: 1,
+        })
+        .encode();
+        let mut writer = self.writer.lock().unwrap();
+        let _ = writer.send(&body);
+        // A client ends each of its ticks: the server counts one position a tick.
+        let _ = writer.send(&S::ClientTickEnd(Empty).encode());
     }
 
     fn position(&self) -> Option<[f64; 3]> {
@@ -534,4 +557,168 @@ fn readable(debug: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Bots that walk across new ground in separate regions: each region loads, lights and sends the chunks ahead of
+/// its player itself. No landing is for terrain or for an area that changed, every chunk a bot's view holds is
+/// lit in its region's world, and the bot was sent each of them.
+#[test]
+#[ignore = "daily"]
+fn bots_exploring_in_separate_regions_load_their_terrain_without_landing() {
+    let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+    let home =
+        std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join("region-explore");
+    let _ = std::fs::remove_dir_all(&home);
+    let mut resources = None;
+    let mut game = open_flat(&mut resources, &root, &home);
+    game.options.dedicated = Some(Vec::new());
+    game.options.execution_role = crate::game::execution_role::ExecutionRole::DedicatedServer;
+    horizon_client::parallel::set_setting(horizon_client::graphics::ParallelTickMode::On);
+    crate::game::regions::tests::REGIONS_FORCED.with(|f| f.set(true));
+    game.set_allow_commands(true);
+    game.ticks_until_autosave = i64::MAX / 2;
+    let net = horizon_client::lan::NetConfig::loopback(0, "regions".into(), 8);
+    let settings = crate::game::lan::LanSettings {
+        port: 0,
+        guest_commands: true,
+        force_game_mode: false,
+    };
+    let hub = horizon_client::lan::hub::HubConfig {
+        default_game_mode: 1,
+        guest_commands: true,
+        force_game_mode: false,
+        hardcore: false,
+        view_distance: 3,
+        simulation_distance: 3,
+        dimension: game.dim.id().to_owned(),
+        allow_flight: true,
+        seed: 1,
+        max_players: 8,
+        integrated: false,
+        levels: game.level_shapes,
+        level_seeds: game.levels.runtime.seeds(),
+    };
+    game.lan_host(settings, net, hub).unwrap();
+    let port = game.lan.as_ref().unwrap().settings.port;
+    let mut bots = Vec::new();
+    for name in ["Alpha", "Bravo"] {
+        let joining = std::thread::spawn(move || Bot::connect(port, name));
+        until(&mut game, "a bot's login", 120, |_| joining.is_finished());
+        let bot = joining.join().unwrap().unwrap();
+        BOTS.with(|b| {
+            b.borrow_mut().push(Arc::new(BotSeen {
+                name: bot.name,
+                seen: Arc::clone(&bot.seen),
+            }))
+        });
+        bots.push(bot);
+    }
+    until(&mut game, "the bots in the world", 120, |g| {
+        bots.iter()
+            .all(|b| find(g, b.name).is_some() && b.position().is_some())
+    });
+    let y = find(&mut game, "Alpha").unwrap().position[1];
+    let conn = |game: &Game<'_>, name: &str| {
+        game.lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.name == name)
+            .map(|g| g.conn)
+    };
+    // Bravo far from Alpha: two regions.
+    let start = [[0.5, 0.5], [4800.5, 5.5]];
+    let bravo_conn = conn(&game, "Bravo").unwrap();
+    game.teleport_to(Target::Guest(bravo_conn), [4800.5, y, 5.5], None, true);
+    until(&mut game, "two regions of the Overworld", 240, |g| {
+        regions_of(g, Dim::Overworld) == 2
+            && bots
+                .iter()
+                .all(|b| find(g, b.name).is_some_and(|h| h.region.is_some()))
+    });
+    until(&mut game, "Bravo told where it stands", 60, |_| {
+        is(bots[1].position(), [4800.5, y, 5.5])
+    });
+    // Both walk on, a flying player's pace: a block every other tick, 600 blocks (nearly forty sections of new
+    // ground each).
+    let mut tick = 0u32;
+    until(&mut game, "the walk", 240, |_| {
+        tick += 1;
+        if tick % 2 == 0 {
+            let along = f64::from(tick / 2);
+            bots[0].step_to(start[0][0] + along, y, start[0][1]);
+            bots[1].step_to(start[1][0], y, start[1][1] + along);
+        }
+        tick >= 1200
+    });
+    // Let the last chunks arrive.
+    let mut still = 0u32;
+    until(&mut game, "the terrain around the bots", 120, |g| {
+        still += 1;
+        still > 100
+            && bots.iter().all(|b| {
+                let h = find(g, b.name).unwrap();
+                let (cx, cz) = (
+                    (h.position[0].floor() as i32) >> 4,
+                    (h.position[2].floor() as i32) >> 4,
+                );
+                let seen = b.seen.lock().unwrap();
+                (cx - 3..=cx + 3).all(|x| (cz - 3..=cz + 3).all(|z| seen.chunks.contains(&(x, z))))
+            })
+    });
+    // A third player joins at the world spawn, where no region is any more: a region is made there, and its
+    // streamer loads the spawn's chunks.
+    let before = regions_of(&game, Dim::Overworld);
+    let joining = std::thread::spawn(move || Bot::connect(port, "Charlie"));
+    until(&mut game, "a late bot's login", 120, |_| joining.is_finished());
+    let charlie = joining.join().unwrap().unwrap();
+    until(&mut game, "Charlie in a region of their own", 240, |g| {
+        regions_of(g, Dim::Overworld) == before + 1
+            && find(g, "Charlie").is_some_and(|h| h.region.is_some())
+            && (-3..=3).all(|x| {
+                (-3..=3).all(|z| charlie.seen.lock().unwrap().chunks.contains(&(x, z)))
+            })
+    });
+    assert!(regions_of(&game, Dim::Overworld) >= 2, "the regions stayed out");
+    // They did walk: the server holds each where the walk ended, hundreds of blocks on.
+    assert!(find(&mut game, "Alpha").unwrap().position[0] > 500.0);
+    assert!(find(&mut game, "Bravo").unwrap().position[2] > 500.0);
+    for why in ["terrain", "area"] {
+        assert_eq!(
+            game.regions.prof.landed_for(why),
+            0,
+            "no landing for {why}: {:?}",
+            game.regions.prof.landed_for("region wants")
+        );
+    }
+    // Every chunk in a bot's view is in its region's world and lit.
+    for b in &bots {
+        let h = find(&mut game, b.name).unwrap();
+        let (cx, cz) = (
+            (h.position[0].floor() as i32) >> 4,
+            (h.position[2].floor() as i32) >> 4,
+        );
+        let slot = game
+            .regions
+            .resident
+            .values_mut()
+            .flat_map(|s| s.games.iter_mut())
+            .find(|s| Some(s.uid) == h.region)
+            .unwrap();
+        let w = slot.game.as_deref().unwrap();
+        for x in cx - 3..=cx + 3 {
+            for z in cz - 3..=cz + 3 {
+                let c = w.world.chunks.get(&(x, z));
+                assert!(
+                    c.is_some_and(|c| c.lit),
+                    "{}: chunk {x},{z} is missing or dark in region {:?}",
+                    b.name,
+                    h.region
+                );
+            }
+        }
+        assert!(b.seen.lock().unwrap().left.is_none(), "{} was kicked", b.name);
+    }
 }
