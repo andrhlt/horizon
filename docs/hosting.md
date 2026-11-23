@@ -968,12 +968,15 @@ Region ticking trades some of vanilla's behaviour for speed, the way other regio
   its own across players must expect that. Writes to the tab list, nicknames or hidden players for players away in a
   region, `level_tick_post` reads of their chunks, and the Input and Sneak events of their players are not
   delivered yet.
-- **Light** at the border of a region is worked out again when the region comes home.
-- **New terrain** around a player in a region is generated and lit on the server's thread. A region whose players
-  see terrain it was not lent comes home alone when the server has some of it (at most every few ticks), and is lent
-  again with it; so does a region whose area grew or shrank because its players moved. A player who teleports to
-  new ground waits a little longer for it. These landings are the ones left for regions that load and light their own
-  chunks.
+- **Terrain and light** are a region's own. Each region has a streamer of its own that loads, generates, lights
+  and unloads the chunks of the sections it owns, on its thread and the workers every streamer shares, so a player
+  who walks into new ground, or joins or teleports to ground no region owns (a region is made there), brings no
+  region home for it, and neither does a region whose area grew or shrank. The server's own streamer keeps to
+  the chunks no region owns. The light a block change makes is worked out by the region that owns the chunk,
+  small edits at once and a big batch (`/fill`) by the workers, as the server does for a level with no regions.
+  Light that an edit at the edge of a region's chunks sends towards a chunk another region holds is worked out
+  again when the two come into one world (the regions merge, or come home): regions never touch, so this is
+  only the one tick before they merge.
 
 A region that panics comes home and the level ticks whole for 200 ticks before it is split again; the log says
 `a region of <level> failed`. A save that writes none of the entities in memory logs `regions: save lost entities`:

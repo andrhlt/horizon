@@ -18,8 +18,10 @@
 //! comes within the merge radius of another is merged with it at the next tick boundary, one absorbing the other
 //! ([`Game::absorb_region`]). No timer brings a region home: it lands (every part comes home to the server's game)
 //! only when the server's thread has something to do with a player or a chunk of theirs (a command, a join or
-//! leave, a death, a native mod's hook, terrain that was not ready when the region was lent, an area that
-//! changed); one region may come home alone. The server's thread waits for them to the region deadline, runs
+//! leave, a death, a native mod's hook); one region may come home alone. Terrain is not a reason: a region has a
+//! streamer of its own ([`Streaming::fork`]) that loads, generates, lights and unloads the chunks of the
+//! sections it owns on its own thread, with its jobs on the pool every streamer shares, and the server's streamer
+//! keeps to the chunks no region owns ([`SetShared::server_owns`]). The server's thread waits for them to the region deadline, runs
 //! the serial phases on what it still holds, and sums what they report (the night skip's sleep counts, `/tps`'
 //! numbers).
 use super::region_map::{Area, Claim, Kind, RegionId, SectionMap};
@@ -412,6 +414,9 @@ impl Spares {
         game
     }
     pub(super) fn give(&self, mut game: Box<Game<'static>>) {
+        // Its streamer rests until the game is lent again (a streamer of the next level's is made then).
+        game.streaming.own = None;
+        game.streaming.paused = true;
         game.regions.link = None;
         game.regions.area.clear();
         game.regions.topology_seen = None;
@@ -444,9 +449,31 @@ pub(super) struct SetShared {
     /// Pairs of regions within the merge radius of each other (the smaller id first), found by their own threads:
     /// the server's thread merges them at the next tick boundary.
     pub(super) merges: std::sync::Mutex<std::collections::BTreeSet<(RegionId, RegionId)>>,
+    /// The regions that are home (landed) this tick: their chunks are the server's again.
+    landed: std::sync::RwLock<FxHashSet<RegionId>>,
 }
 
 impl SetShared {
+    /// Whether the server's own streaming may hold chunk `(x, z)`: no resident region owns its section.
+    pub(super) fn server_owns(&self, chunk: (i32, i32)) -> bool {
+        match self.map.owner_of_chunk(chunk) {
+            None => true,
+            Some(o) => self
+                .landed
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains(&o.id),
+        }
+    }
+    /// Notes which regions are home this tick.
+    pub(super) fn set_landed(&self, ids: impl IntoIterator<Item = RegionId>) {
+        let mut landed = self
+            .landed
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        landed.clear();
+        landed.extend(ids);
+    }
     pub(super) fn ask_merge(&self, a: RegionId, b: RegionId) {
         if a != b {
             self.merges
@@ -491,8 +518,8 @@ struct Report {
     born: Vec<Born>,
     /// The connections of its players after that, when it split.
     conns: Option<Vec<u32>>,
-    /// Why it has to come home alone: its area changed (the chunks of what it claimed are in the server's game),
-    /// or it has no player left.
+    /// Why it has to come home alone: it has no player left. (An area that grew or shrank is no reason: the
+    /// region loads the chunks of its new sections itself and unloads those of the sections it gave up.)
     wants: Option<&'static str>,
 }
 
@@ -532,12 +559,6 @@ pub(super) struct Slot {
     pub(super) mail: Vec<horizon_client::lan::hub::chat::RegionChat>,
     /// Why its own thread asked for it to come home ([`Report::wants`]).
     pub(super) wants: Option<&'static str>,
-    /// Some of the terrain in its players' views was not lent with it (not loaded or not finished yet): it comes
-    /// home to be lent again once the server's game holds some.
-    pub(super) owed: bool,
-    /// Ticks before the terrain it is owed may bring it home again, so terrain that arrives chunk by chunk
-    /// comes in batches.
-    pub(super) terrain_wait: u32,
     /// The regions it split off, until the set takes them in.
     pub(super) born: Vec<Born>,
     /// Its players as `server-status` tells of them, and what it held, as of the last time the region was home.
@@ -581,8 +602,6 @@ impl Slot {
             players: Vec::new(),
             sleep: (0, 0, 0),
             wants: None,
-            owed: false,
-            terrain_wait: 0,
             born: Vec::new(),
             status: Vec::new(),
             entities: 0,
@@ -653,13 +672,9 @@ impl ResidentSet {
             born.append(&mut slot.born);
         }
         for b in born {
-            // Its terrain is the part of its parent's that its players see: owed the same way.
-            let owed = terrain_owed(&b.game, &self.lent);
             let mut slot = Slot::new(b.game, b.id);
             slot.conns = b.conns;
             slot.fresh = true;
-            slot.owed = owed;
-            slot.terrain_wait = TERRAIN_GAP;
             self.games.push(slot);
         }
     }
@@ -674,15 +689,9 @@ const ID_REFILL: u32 = 1 << 14;
 /// Ticks a level stays unsplit after one of its regions failed.
 const FAILED_PAUSE: u32 = 200;
 
-/// The most block changes one region lights in its tick; the rest wait for the next.
-const REGION_RELIGHT_PER_TICK: usize = 1024;
-
 /// Sections a region may hold that its players and ticking chunks no longer need before it gives them up: the
 /// area follows the players in steps, not at every section they cross.
 const SHRINK_SLACK: usize = 24;
-
-/// Ticks between two landings of a region for terrain it is owed.
-pub(super) const TERRAIN_GAP: u32 = 5;
 
 /// Region games kept ready for a region to split off into.
 const SPARE_GAMES: usize = 1;
@@ -806,6 +815,8 @@ impl Game<'_> {
         self.level.clone_from(&from.level);
         self.level_shapes = from.level_shapes;
         self.world_root.clone_from(&from.world_root);
+        // The level's save folder: the region saves the chunks and entities it unloads itself.
+        self.save = Arc::clone(&from.save);
         self.world_biomes = from.world_biomes.clone();
         self.end.set_locator(from.end.locator());
         self.dim = from.dim;
@@ -873,10 +884,35 @@ fn refill_id_block(pool: &AtomicU32, next: &mut u32, end: &mut u32) {
 }
 
 impl Game<'_> {
+    /// Makes this game's streamer the region's `link` stands for: it holds the chunks of the sections the region
+    /// owns in the level's map and no others, so a chunk is never finished in two games, and it runs.
+    pub(super) fn own_region_streaming(&mut self, link: &RegionLink) {
+        let (shared, id) = (Arc::clone(&link.shared), link.id);
+        self.streaming.own = Some(Arc::new(move |x, z| {
+            shared
+                .map
+                .owner_of_chunk((x, z))
+                .is_some_and(|o| o.id == id)
+        }));
+        self.streaming.paused = false;
+        self.streaming.remote = false;
+    }
+
     /// Region `part` of the level in place, moved into region game `w`: its chunks with their block entities,
     /// block and fluid ticks and random-tick caches, every entity that stands in it, and what is kept by block or
     /// by entity in it.
     pub(super) fn lend_region(&mut self, w: &mut Game<'_>, mut part: RegionPart) {
+        // The region streams its own chunks (it loads, generates, lights and unloads them on its thread): its
+        // streamer is one more of the level's, with the same generator and workers, and takes in what the lender's
+        // had for the chunks that move. A game that was a region of this level before keeps its streamer.
+        if w.regions.link.is_none() {
+            w.streaming = self.streaming.fork();
+        }
+        let unlit = self
+            .streaming
+            .release_columns(part.world.chunks.keys().copied());
+        w.streaming.adopt_columns(part.world.chunks.values());
+        part.world.dirty_light.extend(unlit);
         w.world = part.world;
         w.block_ticks = part.ticks;
         w.random_tick_sections = part.sections;
@@ -1012,6 +1048,16 @@ impl Game<'_> {
                 std::panic::resume_unwind(e);
             }
         });
+        // The chunks are this game's streamer's now, as they were its lender's before.
+        let unlit = w
+            .streaming
+            .release_columns(chunks.iter().map(|c| (c.x, c.z)));
+        self.world.dirty_light.extend(unlit);
+        self.streaming.adopt_columns(
+            chunks
+                .iter()
+                .filter_map(|c| self.world.chunks.get(&(c.x, c.z))),
+        );
         self.mobs.append(&mut w.mobs);
         self.creaking.take_scanned_back(&mut w.creaking);
         self.dropped.append(&mut w.dropped);
@@ -1253,7 +1299,7 @@ impl Game<'_> {
             .hub
             .lend_trackers(regions.count, |chunk| regions.of_chunk(chunk))
             .into_iter();
-        let split = self.split_level(&regions, true);
+        let split = self.split_level(&regions, false);
         let shared = Arc::new(SetShared::default());
         let mut set = ResidentSet {
             games: Vec::with_capacity(regions.count),
@@ -1303,6 +1349,9 @@ impl Game<'_> {
                 ids: Arc::clone(&self.regions.ids),
                 pool: Arc::clone(&pool),
             });
+            if let Some(link) = w.regions.link.clone() {
+                w.own_region_streaming(&link);
+            }
             lent.extend(chunks.iter().map(|c| (c.x, c.z)));
             let mut slot = Slot::new(w, id);
             slot.conns = conns;
@@ -1310,13 +1359,6 @@ impl Game<'_> {
             set.games.push(slot);
         }
         set.lent = Arc::new(lent);
-        for slot in &mut set.games {
-            slot.owed = slot
-                .game
-                .as_deref()
-                .is_some_and(|w| terrain_owed(w, &set.lent));
-            slot.terrain_wait = TERRAIN_GAP;
-        }
         self.lan = Some(host);
         self.regions.prof.note_resident();
         self.regions.prof.add(Step::Split, entered);
@@ -1350,7 +1392,6 @@ impl Game<'_> {
                         continue;
                     }
                 }
-                set.games[k].terrain_wait = set.games[k].terrain_wait.saturating_sub(1);
                 k += 1;
             }
             if relent {
@@ -1396,6 +1437,16 @@ impl Game<'_> {
         }
         self.stock_spares();
         self.streaming.lent = Some(Arc::clone(&set.lent));
+        // The server's own streamer keeps to what no resident region owns; a region's streamer loads, lights and
+        // saves its own, the chunks that are home are the server's again.
+        set.shared.set_landed(
+            set.games
+                .iter()
+                .filter(|s| s.landed)
+                .map(|s| s.uid),
+        );
+        let own = Arc::clone(&set.shared);
+        self.streaming.own = Some(Arc::new(move |x, z| own.server_owns((x, z))));
         // The level as its regions read it at the start of their ticks.
         self.publish_global();
         self.deliver_away_out_home();
@@ -1699,18 +1750,6 @@ impl Game<'_> {
                 }
             }
         }
-        // Where its players stand: the areas the server keeps loaded for them.
-        if let Some(host) = self.lan.as_mut() {
-            let places = set
-                .games
-                .iter()
-                .filter(|s| !s.landed)
-                .flat_map(|s| s.places.iter().copied())
-                .collect();
-            host.hub
-                .away_places
-                .insert(self.dim.id().to_owned(), places);
-        }
         if let Some(e) = failed {
             // A region that panicked or could not start does not fail the server's tick: the regions come home,
             // the level ticks on this thread, and splitting waits a while before it is tried again.
@@ -1781,33 +1820,11 @@ impl Game<'_> {
             if wants_land(w) {
                 add(k, "region wants");
             } else if let Some(why) = s.wants {
-                // Its own thread found its area changed, or no player left in it.
+                // Its own thread found no player left in it.
                 add(k, why);
-            } else if s.owed && s.terrain_wait == 0 && self.terrain_arrived(w) {
-                add(k, "terrain");
             }
         }
         (!slots.is_empty()).then_some(Land::Slots(slots))
-    }
-
-    /// Whether the server's game holds finished chunks in the views of region game `w`'s players: terrain that
-    /// was not ready when the region was lent, and is now.
-    fn terrain_arrived(&self, w: &Game<'_>) -> bool {
-        let Some(h) = w.lan.as_ref() else {
-            return false;
-        };
-        let view = h.hub.config.view_distance.clamp(2, 32);
-        h.hub.guests.iter().filter(|g| h.hub.here(g)).any(|g| {
-            let (cx, cz) = g.chunk();
-            (cx - view..=cx + view).any(|x| {
-                (cz - view..=cz + view).any(|z| {
-                    self.world
-                        .chunks
-                        .get(&(x, z))
-                        .is_some_and(|c| c.lit && c.postprocess.is_empty())
-                })
-            })
-        })
     }
 
     /// Region `k` alone back in the server's level: it ticks there with the server's thread this tick, and is
@@ -1904,7 +1921,7 @@ impl Game<'_> {
             .lend_trackers(1, |chunk| layout.of_chunk(chunk))
             .into_iter()
             .next();
-        let split = self.split_level(&layout, true);
+        let split = self.split_level(&layout, false);
         let part = split
             .parts
             .into_iter()
@@ -1929,24 +1946,21 @@ impl Game<'_> {
         self.streaming.lent = None;
         let lent = Arc::make_mut(&mut set.lent);
         lent.extend(chunks.iter().map(|c| (c.x, c.z)));
-        // What the region could not be lent yet is still owed to it.
-        let owed = terrain_owed(&w, lent);
         let slot = &mut set.games[k];
         slot.game = Some(w);
         slot.landed = false;
         slot.fresh = true;
         slot.conns = conns;
-        slot.owed = owed;
-        slot.terrain_wait = TERRAIN_GAP;
         self.streaming.lent = Some(Arc::clone(&set.lent));
         true
     }
 
     /// The resident regions of the level in place back: their parts of the level and their players.
     fn land_resident_set(&mut self, mut set: ResidentSet) {
-        let dim = self.dim;
         self.route_region_chat(Some(&mut set));
         self.streaming.lent = None;
+        // Everything is home: the server's streamer owns the level again, once the regions' chunks are in.
+        self.streaming.own = None;
         // One still ticking is waited for, and the regions it split off are among the set.
         for slot in &mut set.games {
             let _ = slot.home(None);
@@ -1993,7 +2007,6 @@ impl Game<'_> {
             // whose players' packets (their commands among them) then found no guest at the next poll and were
             // dropped.
             host.hub.release_away_conns(&conns);
-            host.hub.away_places.remove(dim.id());
             host.hub.restore_guest_order();
         }
         self.lan = host;
@@ -2238,6 +2251,10 @@ impl Game<'_> {
             running: Some(true),
             packets_drained: false,
         };
+        // Its own chunks: the ones its players' areas need are loaded, generated, lit and unloaded here, on this
+        // thread and the shared workers, as the server's tick does for the chunks no region owns.
+        self.update_dedicated_streaming();
+        self.update_world();
         self.update_chunk_tickets();
         // The anticheat's timer is given its players' time since their last tick here: a region's hub does not
         // poll the network, where the server's hub does it.
@@ -2298,11 +2315,9 @@ impl Game<'_> {
         if let Some(h) = self.lan.as_mut() {
             h.hub.away_sleep = counts;
         }
-        // The light its block changes made, here and not on the server thread: coalesced, and a bounded
-        // amount per tick, the rest carried to the next tick.
-        let sky_light = self.streaming.sky_light;
-        self.streaming
-            .relight_region_edits(&mut self.world, sky_light, REGION_RELIGHT_PER_TICK);
+        // The light its block changes made is worked out by its own streamer at the start of the next tick
+        // (`update_world`), as the server's is for the chunks it holds: small edits at once, a big batch (a
+        // `/fill`) by the workers.
         // What the global tick needs of this region: its living players and its mob counts.
         self.send_census();
         Ok(())
@@ -2321,8 +2336,7 @@ impl Game<'_> {
     ///   ([`Game::merge_regions`]).
     /// - Sections it no longer needs are given up once enough pile up ([`SHRINK_SLACK`]).
     ///
-    /// The chunks of an area that grew are in the server's game: the region is asked home alone
-    /// ([`Report::wants`]) and lent again with them.
+    /// The chunks of an area that grew are loaded by the region's own streamer; no landing is needed for them.
     fn region_topology(&mut self) -> Report {
         let mut report = Report::default();
         let Some(link) = self.regions.link.clone() else {
@@ -2411,7 +2425,6 @@ impl Game<'_> {
         self.regions.topology_seen = Some(seen);
         let desired = cut.area_of(keep);
         // What it needs and does not own yet: claimed now, or a merge with whoever owns it.
-        let mut grew = false;
         let mut owners: FxHashSet<RegionId> = FxHashSet::default();
         for (&section, &kind) in &desired {
             if self
@@ -2424,7 +2437,6 @@ impl Game<'_> {
             }
             match link.shared.map.claim(link.id, section, kind) {
                 Claim::Held => {
-                    grew |= !self.regions.area.contains_key(&section);
                     let have = self.regions.area.entry(section).or_insert(kind);
                     *have = (*have).max(kind);
                 }
@@ -2441,8 +2453,7 @@ impl Game<'_> {
             .filter(|s| !desired.contains_key(s))
             .copied()
             .collect();
-        let shrinks = stale.len() >= SHRINK_SLACK;
-        if shrinks {
+        if stale.len() >= SHRINK_SLACK {
             for section in stale {
                 link.shared.map.release(link.id, section);
                 self.regions.area.remove(&section);
@@ -2461,9 +2472,6 @@ impl Game<'_> {
         owners.extend(link.shared.map.neighbours(link.id, &self.regions.area));
         for other in owners {
             link.shared.ask_merge(link.id, other);
-        }
-        if grew || shrinks {
-            report.wants = Some("area");
         }
         report
     }
@@ -2525,7 +2533,9 @@ impl Game<'_> {
         }
         dest.regions.area = area;
         dest.regions.topology_seen = None;
-        dest.regions.link = Some(RegionLink { id, ..link.clone() });
+        let born_link = RegionLink { id, ..link.clone() };
+        dest.own_region_streaming(&born_link);
+        dest.regions.link = Some(born_link);
         Ok(Born {
             game: dest,
             id,
@@ -2619,7 +2629,6 @@ impl Game<'_> {
                 slot.sleep.2 + gone_slot.sleep.2,
             );
             slot.chunks += gone_slot.chunks;
-            slot.owed |= gone_slot.owed;
             slot.wants = slot.wants.or(gone_slot.wants);
             slot.game = Some(big);
             self.regions.spares.give(small);
@@ -2636,19 +2645,6 @@ fn chunks_of(w: &Game<'_>) -> Vec<ChunkPos> {
         .keys()
         .map(|&(x, z)| ChunkPos::new(x, z))
         .collect()
-}
-
-/// Whether a chunk in the view of one of region game `w`'s players is not among the chunks `lent` to the
-/// regions: not loaded yet, or not finished, so the server's game still holds it.
-pub(super) fn terrain_owed(w: &Game<'_>, lent: &FxHashSet<(i32, i32)>) -> bool {
-    let Some(h) = w.lan.as_ref() else {
-        return false;
-    };
-    let view = h.hub.config.view_distance.clamp(2, 32);
-    h.hub.guests.iter().filter(|g| h.hub.here(g)).any(|g| {
-        let (cx, cz) = g.chunk();
-        (cx - view..=cx + view).any(|x| (cz - view..=cz + view).any(|z| !lent.contains(&(x, z))))
-    })
 }
 
 /// Takes a landed region's reported sleep counts out of the total the server's hub keeps for the regions away.

@@ -582,6 +582,12 @@ pub struct StreamingCommit {
 
 pub struct Streaming {
     shared: Arc<Shared>,
+    /// Makes another streamer for the same terrain generator ([`Streaming::fork`]).
+    forker: Arc<dyn Fn(Arc<WorkerContext>, usize) -> Streaming + Send + Sync>,
+    /// Which chunks this streamer may hold finished in its world, when its world is a part of a level (a
+    /// resident region's): a chunk that fails it is never finished here, and one in the world that fails it
+    /// is unloaded. `None`: every chunk.
+    pub own: Option<Arc<dyn Fn(i32, i32) -> bool + Send + Sync>>,
     /// Columns generated and saved as they were left behind: new when they
     /// next arrive, though read from the save (`World::loaded_chunks`).
     dropped_new: FxHashSet<(i32, i32)>,
@@ -1245,6 +1251,10 @@ impl Streaming {
         // The work kept in flight is sized for the workers this streamer may
         // use: the pool's, or fewer when asked (tests, a placeholder).
         let workers = threads.clamp(1, pool.threads());
+        let forker: Arc<dyn Fn(Arc<WorkerContext>, usize) -> Streaming + Send + Sync> = {
+            let generator = generator.clone();
+            Arc::new(move |context, threads| Streaming::new(generator.clone(), context, threads))
+        };
         let non_air_sections = {
             let generator = generator.clone();
             Arc::new(move |p: &Proto| generator.non_air_sections(p))
@@ -1259,6 +1269,8 @@ impl Streaming {
         };
         Self {
             shared,
+            forker,
+            own: None,
             non_air_sections,
             proto_bytes,
             caches,
@@ -1342,6 +1354,68 @@ impl Streaming {
             immediate_scratch: MeshScratch::default(),
             nearby_cooldown: Default::default(),
         }
+    }
+    /// Whether this streamer may hold chunk `(x, z)` finished in its world ([`Streaming::own`]).
+    fn owns(&self, x: i32, z: i32) -> bool {
+        self.own.as_ref().is_none_or(|own| own(x, z))
+    }
+    /// Another streamer for the same terrain, for a part of the level that ticks on a thread of its own (a
+    /// resident region): it generates, saves and lights with the same generator and save folder and takes its
+    /// jobs from the same worker pool, with the settings this one has. It holds nothing and has no area yet.
+    pub fn fork(&self) -> Streaming {
+        let context = self.shared.context.read().unwrap().clone();
+        let mut s = (self.forker)(context, self.workers);
+        s.radius = self.radius;
+        s.sky_light = self.sky_light;
+        s.nether_shading = self.nether_shading;
+        s.biome_zoom = self.biome_zoom;
+        s.biome_blend = self.biome_blend;
+        s.smooth_lighting = self.smooth_lighting;
+        s.cutout_leaves = self.cutout_leaves;
+        s.opaque_ice = self.opaque_ice;
+        s.leaf_culling = self.leaf_culling;
+        s.mesh = self.mesh;
+        s.remote = self.remote;
+        s
+    }
+    /// Chunks (already finished, in a world) that moved into this streamer's world: what it keeps by column
+    /// follows them, so none is lit, decorated or finished a second time.
+    pub fn adopt_columns<'a>(&mut self, chunks: impl IntoIterator<Item = &'a Arc<Chunk>>) {
+        self.generation_scan.exhausted = false;
+        for c in chunks {
+            let key = (c.x, c.z);
+            self.decorated.insert(key);
+            self.protos.remove(&key);
+            self.light_views.remove(&key);
+            self.generating.remove(&key);
+            if c.lit {
+                self.lit.insert(key);
+            } else {
+                self.lit.remove(&key);
+            }
+        }
+    }
+    /// Chunks that left this streamer's world for another's (or came home): what it keeps by column goes. The
+    /// jobs still queued or running for them finish, and what they bring is dropped (a light result finds no
+    /// light job waiting for it, a chunk is not one this streamer owns). Returns the columns whose light job was
+    /// still running: their light is not what the job would have made, and the world they went to lights them
+    /// again (`World::dirty_light`).
+    pub fn release_columns(
+        &mut self,
+        keys: impl IntoIterator<Item = (i32, i32)>,
+    ) -> Vec<(i32, i32)> {
+        self.generation_scan.exhausted = false;
+        let mut unfinished = Vec::new();
+        for key in keys {
+            self.lit.remove(&key);
+            self.meshed.remove(&key);
+            if self.lighting.remove(&key).is_some() {
+                unfinished.push(key);
+            }
+            self.light_snapshots.remove(&key);
+            self.decorated.remove(&key);
+        }
+        unfinished
     }
     /// Shares generation resources, but gives distant work its own worker state.
     pub fn lod_source(&self) -> Arc<dyn LodSource> {
@@ -1594,7 +1668,7 @@ impl Streaming {
         // the column loads later). A generated one is saved first: its
         // neighbours were decorated around it, so generating it again would
         // not give it back.
-        if !self.ranges().chunk_kept(key.0, key.1, self.decorates) {
+        if !self.owns(key.0, key.1) || !self.ranges().chunk_kept(key.0, key.1, self.decorates) {
             if !self.protos.contains_key(&key) && !world.chunks.contains_key(&key) {
                 self.decorated.remove(&key);
             }
@@ -1974,7 +2048,10 @@ impl Streaming {
         let far = if resume.sweep && !self.remote {
             let ranges = self.ranges();
             let decorates = self.decorates;
-            plan_unloads(world, |x, z| ranges.unloaded(x, z, decorates))
+            let own = self.own.clone();
+            plan_unloads(world, |x, z| {
+                own.as_ref().is_some_and(|own| !own(x, z)) || ranges.unloaded(x, z, decorates)
+            })
         } else {
             Vec::new()
         };
@@ -2137,6 +2214,7 @@ impl Streaming {
                         || world.chunks.contains_key(&(x, z))
                         || self.finishing.contains(&(x, z))
                         || !ranges.in_range(x, z, 1)
+                        || !self.owns(x, z)
                     {
                         continue;
                     }
@@ -2514,6 +2592,18 @@ impl Streaming {
         if positions.is_empty() {
             return;
         }
+        // A region's world holds its own chunks and no others: light an edit sent towards a chunk it lacks is
+        // worked out again when that chunk is in the world ([`World::seam_light`]).
+        if self.own.is_some() {
+            for p in &positions {
+                let (cx, cz) = (p.0 >> 4, p.2 >> 4);
+                let beside_gap = (-1..=1)
+                    .any(|dz| (-1..=1).any(|dx| !world.chunks.contains_key(&(cx + dx, cz + dz))));
+                if beside_gap {
+                    world.seam_light.insert((cx, cz));
+                }
+            }
+        }
         let mut changed = LightChanges::default();
         crate::light::relight(
             &mut world.chunks,
@@ -2531,61 +2621,6 @@ impl Streaming {
                 self.light_log.push((self.light_edit_sequence, p));
             }
         }
-    }
-    /// A resident region's block edits, lit inside its own tick instead of on the server thread when the
-    /// region comes home: the edits coalesced per block (the first old state, the last new one), those whose
-    /// column and eight neighbours are all in the region's world lit in place, at most `cap` blocks of them;
-    /// the rest (at the region's edge, or past the cap) stay in `world.light_edits` for the next tick or for
-    /// the server when the region lands. Returns the blocks lit.
-    pub fn relight_region_edits(
-        &mut self,
-        world: &mut World,
-        sky_light: bool,
-        cap: usize,
-    ) -> usize {
-        if world.light_edits.is_empty() {
-            return 0;
-        }
-        let edits = std::mem::take(&mut world.light_edits);
-        let mut merged: FxHashMap<(i32, i32, i32), (usize, u32, u32)> = FxHashMap::default();
-        for (n, (p, old, new)) in edits.into_iter().enumerate() {
-            merged
-                .entry(p)
-                .and_modify(|e| e.2 = new)
-                .or_insert((n, old, new));
-        }
-        let mut merged: Vec<_> = merged.into_iter().collect();
-        merged.sort_unstable_by_key(|(_, (n, _, _))| *n);
-        let mut positions = Vec::new();
-        for (p, (_, old, new)) in merged {
-            let own = (-1..=1).all(|dz| {
-                (-1..=1).all(|dx| {
-                    world
-                        .chunks
-                        .contains_key(&((p.0 >> 4) + dx, (p.2 >> 4) + dz))
-                })
-            });
-            if !own || positions.len() >= cap {
-                world.light_edits.push((p, old, new));
-            } else if self.light_tables.differs(old, new) {
-                positions.push(p);
-            }
-        }
-        if positions.is_empty() {
-            return 0;
-        }
-        let mut changed = LightChanges::default();
-        crate::light::relight(
-            &mut world.chunks,
-            &self.light_tables,
-            sky_light,
-            &positions,
-            false,
-            &mut changed,
-        );
-        Self::mark_light_changes(world, &changed);
-        Self::relight_beside_unlit(world, &changed);
-        positions.len()
     }
     /// Hands a big batch of edits (a `/fill` arriving block by block) to the
     /// workers: the columns they touch and their neighbours get full light

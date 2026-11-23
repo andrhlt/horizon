@@ -12,7 +12,7 @@
 //! placed in one at the next boundary ([`Game::route_strays`]).
 use super::region_map::Claim;
 use super::region_tasks::HandOff;
-use super::regions::{RegionLink, Regions, ResidentSet, Slot, TERRAIN_GAP, terrain_owed};
+use super::regions::{RegionLink, Regions, ResidentSet, Slot};
 use super::{Dim, Game};
 use horizon_core::fast_hash::FxHashSet;
 use std::sync::Arc;
@@ -134,9 +134,7 @@ impl Game<'_> {
         w.bind_lan_residents();
         host.hub.away.insert(conn);
         slot.conns.push(conn);
-        // Their view reaches chunks the region does not hold yet: it comes home for them once they load.
-        slot.owed = true;
-        slot.terrain_wait = TERRAIN_GAP;
+        // Their view reaches chunks the region does not hold yet: its own streamer loads them.
         self.lan = Some(host);
         self.bind_lan_residents();
         log::info!(
@@ -209,7 +207,7 @@ impl Game<'_> {
             .lend_trackers(1, |c| layout.of_chunk(c))
             .into_iter()
             .next();
-        let split = self.split_level(&layout, true);
+        let split = self.split_level(&layout, false);
         let part = split
             .parts
             .into_iter()
@@ -242,18 +240,18 @@ impl Game<'_> {
             ids: Arc::clone(&self.regions.ids),
             pool,
         });
+        if let Some(link) = w.regions.link.clone() {
+            w.own_region_streaming(&link);
+        }
         for other in neighbours {
             set.shared.ask_merge(id, other);
         }
         self.streaming.lent = None;
         let lent = Arc::make_mut(&mut set.lent);
         lent.extend(chunks.iter().map(|c| (c.x, c.z)));
-        let owed = terrain_owed(&w, lent);
         let mut slot = Slot::new(w, id);
         slot.conns = conns;
         slot.fresh = true;
-        slot.owed = owed;
-        slot.terrain_wait = TERRAIN_GAP;
         set.games.push(slot);
         self.streaming.lent = Some(Arc::clone(&set.lent));
         log::info!("regions: region {id} made for the player on connection {conn}");
