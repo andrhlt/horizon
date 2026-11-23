@@ -5,6 +5,14 @@ use horizon_client::{hotbar, items::ItemStack, keybinds, text::Text};
 use horizon_core::nbt::Tag;
 
 impl Game<'_> {
+    /// Saved toolbars as this world takes their stacks in (`ItemStack.CODEC`,
+    /// `applyPatch` against its item prototypes), so they stack with its own.
+    fn clean_hotbar_rows(&self, rows: &mut [Vec<Option<ItemStack>>]) {
+        for stack in rows.iter_mut().flatten().flatten() {
+            self.clean_stack(stack);
+        }
+    }
+
     /// Whether the key bound to `mapping` is held, or the controller button bound to it.
     pub(super) fn mapped_key_down(&self, mapping: &str) -> bool {
         keybinds::key_code(self.settings.keys.get(mapping))
@@ -21,7 +29,8 @@ impl Game<'_> {
         }
         let path = Self::options_path().with_file_name("hotbar.nbt");
         let known = |id: &str| self.res.items().get(id).is_some();
-        let rows = hotbar::load(&path, &known);
+        let mut rows = hotbar::load(&path, &known);
+        self.clean_hotbar_rows(&mut rows);
         let key = |mapping: &str| keybinds::display_name(self.settings.keys.get(mapping)).plain();
         let empty = || ItemStack::new("minecraft:air", 0);
         let mut items = Vec::with_capacity(hotbar::GROUPS * hotbar::SIZE);
@@ -72,6 +81,7 @@ impl Game<'_> {
         let path = Self::options_path().with_file_name("hotbar.nbt");
         let known = |id: &str| self.items().get(id).is_some();
         let mut rows = hotbar::load(&path, &known);
+        self.clean_hotbar_rows(&mut rows);
         if load {
             for (slot, stack) in rows[index].iter().enumerate() {
                 self.inventory[slot] = stack.clone();
@@ -95,5 +105,28 @@ impl Game<'_> {
         // handleHotbarLoadOrSave: the overlay, said at once.
         self.say_system_now(&message);
         self.titles.set_overlay(message, false);
+    }
+}
+
+#[cfg(test)]
+mod saved_row_tests {
+    use crate::game::game_tests::tests::server_game;
+    use horizon_client::{hotbar, items::ItemStack};
+
+    /// A saved toolbar's stacks are taken in against the world's item prototypes,
+    /// so a loaded one stacks with the inventory's.
+    #[test]
+    #[ignore = "daily"]
+    fn saved_toolbar_stacks_are_the_worlds() {
+        let mut resources = None;
+        let game = server_game(&mut resources);
+        let saved = horizon_core::nbt::parse_snbt(
+            r#"{id:"minecraft:iron_ore",count:3,components:{"minecraft:max_stack_size":64}}"#,
+        )
+        .unwrap()
+        .0;
+        let mut rows: Vec<hotbar::Hotbar> = vec![vec![horizon_client::save::item_from_nbt(&saved)]];
+        game.clean_hotbar_rows(&mut rows);
+        assert_eq!(rows[0][0], Some(ItemStack::new("minecraft:iron_ore", 3)));
     }
 }

@@ -1116,6 +1116,12 @@ impl GameLevel<'_> {
             PreRemove::Campfire => horizon_client::save::decode_items(tag.get("Items"), 4),
             _ => return true,
         };
+        // Read from the saved tag: taken in against this world's item prototypes.
+        let mut items = items;
+        horizon_client::item_data::clean_stacks(
+            items.iter_mut().flatten(),
+            &self.items.component_defaults,
+        );
         for stack in items {
             self.drop_item_stack(pos, stack);
         }
