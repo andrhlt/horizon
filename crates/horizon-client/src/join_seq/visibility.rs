@@ -1,8 +1,11 @@
 //! Snapshot visibility of owners temporarily absent from their resident storage.
 //! Independent of residency producers: a sink holds no Game or entity roster.
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
 };
 
 /// Process-wide outstanding entity passes, including unbound owners and parked levels.
@@ -13,17 +16,56 @@ pub fn passes_settled() -> bool {
     PASSES.load(Ordering::Relaxed) == 0
 }
 
+/// How many passes are outstanding now (what `passes_settled` says is not zero).
+pub fn passes_outstanding() -> usize {
+    PASSES.load(Ordering::Relaxed)
+}
+
+/// With `HORIZON_TRACE_PASSES` set, every outstanding pass is remembered with the place that took it and the
+/// thread it was taken on, for [`pass_sites`]: a save that finds a pass lifted can then say whose it is.
+fn tracing() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("HORIZON_TRACE_PASSES").is_some())
+}
+static NEXT_SITE: AtomicU64 = AtomicU64::new(0);
+static SITES: Mutex<BTreeMap<u64, String>> = Mutex::new(BTreeMap::new());
+
+/// Where each outstanding pass was taken (empty unless `HORIZON_TRACE_PASSES` is set), oldest first.
+pub fn pass_sites() -> Vec<String> {
+    SITES
+        .lock()
+        .map(|sites| sites.values().cloned().collect())
+        .unwrap_or_default()
+}
+
 /// Lexical obligation for rows held outside their authoritative storage.
 #[derive(Debug)]
-pub struct PassLease(());
+pub struct PassLease(Option<u64>);
 impl PassLease {
+    #[track_caller]
     pub fn enter() -> Self {
         PASSES.fetch_add(1, Ordering::Relaxed);
-        Self(())
+        Self(tracing().then(|| {
+            let id = NEXT_SITE.fetch_add(1, Ordering::Relaxed);
+            let site = format!(
+                "{} on {}",
+                std::panic::Location::caller(),
+                std::thread::current().name().unwrap_or("an unnamed thread")
+            );
+            if let Ok(mut sites) = SITES.lock() {
+                sites.insert(id, site);
+            }
+            id
+        }))
     }
 }
 impl Drop for PassLease {
     fn drop(&mut self) {
+        if let Some(id) = self.0
+            && let Ok(mut sites) = SITES.lock()
+        {
+            sites.remove(&id);
+        }
         PASSES.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -41,6 +83,7 @@ impl Visibility {
         Arc::ptr_eq(&self.0, &other.0)
     }
     /// Borrow an owner until this lease drops. Nested borrows are independent.
+    #[track_caller]
     pub fn enter(&self) -> Lease {
         let epoch = self.0.lock().unwrap();
         epoch.0.fetch_add(1, Ordering::Relaxed);

@@ -235,6 +235,7 @@ impl<T> ResidentSlot<T> {
     pub fn bind_visibility(&mut self, sink: &visibility::Visibility) {
         self.2 = Some(sink.clone());
     }
+    #[track_caller]
     pub fn visibility_lease(&self) -> Option<visibility::Lease> {
         self.2.as_ref().map(|s| s.enter())
     }
@@ -530,6 +531,7 @@ impl<T, const DIRECT: bool> JoinList<T, DIRECT> {
     }
     /// Lease a bare extraction or a held-out local copy. `extract` returns T,
     /// so its caller must hold this across put_back OR permanent retirement.
+    #[track_caller]
     pub fn visibility_lease(&self) -> Option<visibility::Lease> {
         self.3.as_ref().map(|b| b.sink.enter())
     }
@@ -584,6 +586,7 @@ impl<T, const DIRECT: bool> JoinList<T, DIRECT> {
         }
     }
     /// Lift a whole pass, leaving an empty spawn buffer behind.
+    #[track_caller]
     pub fn lift(&mut self) -> Self {
         self.written();
         let mut taken = std::mem::take(self);

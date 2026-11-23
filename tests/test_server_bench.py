@@ -276,3 +276,59 @@ class ServerBenchProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ServerBenchWorldTests(unittest.TestCase):
+    def test_region_landings_sum_the_profile_windows(self):
+        from tools.server_bench import region_landings
+        line = ('[20:37:12] [Server thread/INFO]: regions: wait 1.0 ms, global 2.0 ms, landing 30.0 ms (avg), landing ticks {n} '
+                '(avg 91.0 ms, 1154.7 ms max); tick avg 91.0 p50 60.0 p95 245.5 p99 1142.8 max 1154.7 ms; per tick: split 25.5, '
+                'other 1.0; 150 landings, 4 splits, landed for: {why}')
+        lines = [line.format(n=199, why='region age 625, chat 7'), 'unrelated', line.format(n=1, why='chat 3, region wants 9'),
+                 line.format(n=0, why='')]
+        got = region_landings(lines)
+        self.assertEqual((got['windows'], got['ticks'], got['landing_ticks'], got['landing_share']), (3, 600, 200, 0.333))
+        self.assertEqual(got['reasons'], {'region age': 625, 'chat': 10, 'region wants': 9})
+        self.assertEqual((got['landings'], got['splits']), (450, 12))
+        self.assertIsNone(region_landings(['no profile here']))
+
+    def test_problems_count_only_those_that_appear(self):
+        from tools.server_bench import problems
+        lines = ['x entity ids exhausted: 1', 'entity ids exhausted again', 'fine', 'Horizon crashed: entity pass is lifted']
+        self.assertEqual(problems(lines), {'entity_ids_exhausted': 2, 'entity_pass_lifted': 1})
+
+    def test_a_copied_server_toml_is_local_without_backups_or_a_webhook(self):
+        from tools.server_bench import harden_toml
+        text = ('[server]\nbind = ""\nonline_mode = true\n\n[backups]\nevery = "6h"\nkeep = 2\n\n[panel]\nbind = "127.0.0.1:8130"\n\n'
+                '[discord]\nwebhook = "https://example.invalid/hook"\nenabled = true\n\n[regions]\nenabled = true\n')
+        out = tomllib.loads(harden_toml(text))
+        self.assertEqual((out['server']['bind'], out['server']['online_mode']), ('127.0.0.1', False))
+        self.assertEqual((out['backups']['every'], out['backups']['keep']), ('0', 2))
+        self.assertNotIn('discord', out)
+        self.assertTrue(out['regions']['enabled'])
+        # Bots on another machine need the server to listen beyond this one.
+        self.assertEqual(tomllib.loads(harden_toml(text, bots_via=True))['server']['bind'], '')
+
+    def test_a_world_is_copied_whole_and_without_its_lock(self):
+        from tools.server_bench import copy_world
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'source'
+            (source / 'region').mkdir(parents=True)
+            (source / 'level.dat').write_bytes(b'level')
+            (source / 'region' / 'r.0.0.mca').write_bytes(b'chunks')
+            (source / 'session.lock').write_bytes(b'lock')
+            target = Path(tmp) / 'run' / 'world'
+            target.parent.mkdir()
+            copy_world(source, target)
+            self.assertEqual((target / 'region' / 'r.0.0.mca').read_bytes(), b'chunks')
+            self.assertFalse((target / 'session.lock').exists())
+            (target / 'level.dat').write_bytes(b'changed by the run')
+            self.assertEqual((source / 'level.dat').read_bytes(), b'level')
+            with self.assertRaises(RuntimeError):
+                copy_world(Path(tmp) / 'region', Path(tmp) / 'elsewhere')
+
+    def test_regions_alternate_in_the_opposite_order_every_second_round(self):
+        from tools.server_bench import sides
+        self.assertEqual([sides('horizon', 'alternate', r) for r in range(3)], [[False, True], [True, False], [False, True]])
+        self.assertEqual(sides('horizon', 'on', 0), [None])
+        self.assertEqual(sides('vanilla', 'alternate', 0), [None])

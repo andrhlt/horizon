@@ -914,6 +914,14 @@ reproducible by anyone, and show the same gameplay on both sides.
   machine, commit, Java version, settings and every run) and prints a comparison table. Results are
   published like the client benchmark, with the machine, the versions and the exact commands. TPS is derived
   from `/tick query`'s average (20 while it fits in 50 ms), since the command reports times, not the rate.
+- **A copy of a real world.** `tools/server_bench.py --world DIR --clone-players --regions alternate --repeat 2`
+  gives every run a fresh copy of the world folder `DIR` (never written), gives the bots the saved data of the
+  world's most recently active players (`tools/world_players.py`: player data is private, so the tool refuses a
+  folder inside the repository), starts the warm-up once every bot holds its chunks, and reports that load time,
+  the landing ticks of region ticking and why regions came home. Regions off and on alternate, in the opposite
+  order every second round. `--behaviour roam` walks the bots on foot in survival; a dead bot respawns
+  (`--no-respawn` of `horizon-bots` keeps one dead). `tools/regions_world_check.py` is the scripted real-world check
+  (dead players, teleports typed by players, a long run, a save and a restart).
 - **Published four-way results.** The comparison against vanilla, Paper and Fabric + Lithium is
   [performance/server-vs-vanilla.md](performance/server-vs-vanilla.md); the newer Horizon-versus-Pumpkin run is in
   [performance/server-vs-pumpkin.md](performance/server-vs-pumpkin.md). `tools/server_bench.py` reruns both.

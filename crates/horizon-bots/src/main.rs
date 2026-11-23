@@ -60,6 +60,9 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
   --behaviour B          idle, hotbar, walk, explore, fight or mixed (60 % walk, 20 % explore, 20 % idle); default mixed.
                          fight needs gamemode=survival, force-gamemode=true and allow-flight=true.
                          stand: stays on the ground where the server puts it (/tp), for a survival test.
+                         roam: as stand, but walks to random points 8 to 48 blocks from where the server put it
+                         (survival, allow-flight=true; the report counts the moves the server refused).
+                         Every bot answers a death (SetHealth 0) with a respawn request, whatever it does.
                          One abusive client, to test a server's limits (run it beside a normal crowd):
                          flood-move (--flood moves a tick, each 64 to 256 blocks away, ignoring chunks),
                          flood-acks (--flood chunk batch acks asking for 64 chunks a tick, while exploring),
@@ -86,6 +89,11 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
   --attack-rounds N      stop after N rounds of attacks (each hits every target seen so far once);
                          default no limit
   --no-swing             attack without swinging (a kill aura hiding its swing, for the anticheat's tests)
+  --stdin-stop           end the run, with its report, when a line `stop` arrives on standard input (a bench that
+                         starts its measure window once the bots hold their chunks)
+  --no-respawn           stay dead: no respawn request at SetHealth 0 (a player left on the death screen)
+  --run TICK:COMMAND     a command (no slash) each bot types TICK ticks after joining, as a player does; repeat
+                         the flag for more (the command runs as that player, not on the console)
   --no-loaded            never say the level is loaded (ServerboundPlayerLoadedPacket): a vanilla server
                          ignores the player's moves and actions for its first 3 seconds
   --no-read              stop reading from the server once spawned (a client that lets the
@@ -101,6 +109,8 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
                          other swing, landing it while falling: a critical hit, then a sweep from the
                          ground (give them swords); for PvP benches (crit and sweep particles)
   --name PREFIX          bot names: PREFIX0, PREFIX1...; default Bot
+  --first-index N        number the bots from N (PREFIXN, PREFIXN+1...); default 0: a second run of bots
+                         beside the first, with names of their own
   --brand B              the client brand sent in configuration (minecraft:brand); default none
   --far D                ask the server for far terrain out to D chunks, 1024 at most (horizon:lod, needs
                          --brand horizon and a server with horizon-lod-distance), as a Horizon client with
@@ -128,6 +138,9 @@ horizon-bots: load-test bots for a Minecraft Java Edition 26.3 server (offline m
 enum Behaviour {
     Idle,
     Stand,
+    /// Survival on foot: walks to random points near where the server put it, on the ground flag, holding its
+    /// height (so the server needs `allow-flight=true`, as for `fight`). Follows a respawn or a teleport.
+    Roam,
     Hotbar,
     Walk,
     Explore,
@@ -152,6 +165,7 @@ impl Behaviour {
         match self {
             Self::Idle => "idle",
             Self::Stand => "stand",
+            Self::Roam => "roam",
             Self::Hotbar => "hotbar",
             Self::Walk => "walk",
             Self::Explore => "explore",
@@ -198,6 +212,12 @@ struct Options {
     ack_rate: Option<f32>,
     no_read: bool,
     no_loaded: bool,
+    /// --no-respawn: a dead bot stays on the death screen.
+    no_respawn: bool,
+    /// --stdin-stop: a line `stop` on standard input ends the run.
+    stdin_stop: bool,
+    /// --run: (tick after joining, command) every bot types.
+    run: Vec<(u64, String)>,
     height: f64,
     ground: bool,
     /// --raw: (tick after joining, packet id, body).
@@ -207,6 +227,8 @@ struct Options {
     /// --click: the block to open, then the slot, button and click type in its window.
     click: Option<([i32; 3], i16, i8, i32)>,
     name: String,
+    /// --first-index: the number of the first bot's name.
+    first_index: usize,
     /// The `minecraft:brand` to send, if any.
     brand: Option<String>,
     report: Option<String>,
@@ -243,12 +265,16 @@ fn options() -> Result<Options, String> {
         ack_rate: None,
         no_read: false,
         no_loaded: false,
+        no_respawn: false,
+        stdin_stop: false,
+        run: Vec::new(),
         height: 24.0,
         ground: false,
         raw: Vec::new(),
         give: Vec::new(),
         click: None,
         name: "Bot".into(),
+        first_index: 0,
         report: None,
         capture: None,
         brand: None,
@@ -273,6 +299,14 @@ fn options() -> Result<Options, String> {
         }
         if arg == "--crits" {
             o.crits = true;
+            continue;
+        }
+        if arg == "--stdin-stop" {
+            o.stdin_stop = true;
+            continue;
+        }
+        if arg == "--no-respawn" {
+            o.no_respawn = true;
             continue;
         }
         if arg == "--no-loaded" {
@@ -331,8 +365,14 @@ fn options() -> Result<Options, String> {
                     return Err(format!("--far {value}: at most {FAR_MAX} chunks"));
                 }
             }
+            "--first-index" => o.first_index = value.parse().map_err(|_| number("a number"))?,
             "--far-after" => o.far_after = value.parse().map_err(|_| number("seconds"))?,
             "--far-dump" => o.far_dump = Some(value),
+            "--run" => {
+                let (tick, command) = value.split_once(':').ok_or_else(|| number("TICK:COMMAND"))?;
+                let tick = tick.parse().map_err(|_| number("TICK:COMMAND"))?;
+                o.run.push((tick, command.trim_start_matches('/').to_owned()));
+            }
             "--give" => {
                 for part in value.split(',') {
                     let n: Vec<&str> = part.split(':').collect();
@@ -390,7 +430,7 @@ fn options() -> Result<Options, String> {
             _ => return Err(format!("unknown option {arg}; --help lists them")),
         }
     }
-    const BEHAVIOURS: [&str; 18] = [
+    const BEHAVIOURS: [&str; 19] = [
         "scatter",
         "idle",
         "walk",
@@ -398,6 +438,7 @@ fn options() -> Result<Options, String> {
         "fight",
         "mixed",
         "stand",
+        "roam",
         "hotbar",
         "flood-move",
         "flood-acks",
@@ -453,6 +494,13 @@ struct Bot {
     target: Mutex<Vec<(u128, Option<i32>)>>,
     /// The last SetHealth.
     health: Mutex<Option<f32>>,
+    /// The bot holds every chunk round the one it stands in, out to the view distance less one (checked once a
+    /// second): its view has loaded. The report's `ready` counts these.
+    ready: AtomicBool,
+    /// --no-respawn: the bot stays dead.
+    no_respawn: AtomicBool,
+    /// Respawn requests sent (SetHealth reached 0).
+    respawns: AtomicU64,
     /// --far: the far terrain it asks for.
     far: far::Far,
 }
@@ -1128,6 +1176,14 @@ fn read(
             cb::SET_HEALTH => {
                 if let Ok(play::Clientbound::SetHealth(p)) = play::Clientbound::decode(id, &body) {
                     *lock(&bot.health) = Some(p.health);
+                    if wants_respawn(p.health) && !bot.no_respawn.load(Ordering::Relaxed) {
+                        // The death screen's button: ServerboundClientCommandPacket, action 0.
+                        let _ = send(
+                            play::Serverbound::ClientCommand(play::ClientCommand { action: 0 })
+                                .encode(),
+                        );
+                        bot.respawns.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 Ok(())
             }
@@ -1219,7 +1275,7 @@ fn run_bot(
     bot: Arc<Bot>,
     until: Arc<Mutex<Option<Instant>>>,
 ) {
-    let name = format!("{}{index}", o.name);
+    let name = format!("{}{}", o.name, index + o.first_index);
     let asked = Instant::now();
     let connection = match join(&o, &name) {
         Ok(c) => c,
@@ -1237,6 +1293,7 @@ fn run_bot(
         .flat_map(|names| names.split(','))
         .map(|name| (target_uuid(name), None))
         .collect();
+    bot.no_respawn.store(o.no_respawn, Ordering::Relaxed);
     bot.online.store(true, Ordering::SeqCst);
     {
         let (writer, bot) = (writer.clone(), bot.clone());
@@ -1302,7 +1359,7 @@ fn run_bot(
     let mut random = Random(o.seed ^ (index as u64).wrapping_mul(0x2545_F491_4F6C_DD1D));
     let mut pos = spawn;
     // Fight bots stay at their spawn height; the others climb to fly above the terrain.
-    let cruise = if behaviour == Behaviour::Fight {
+    let cruise = if matches!(behaviour, Behaviour::Fight | Behaviour::Roam) {
         spawn[1]
     } else {
         spawn[1] + o.height
@@ -1312,6 +1369,7 @@ fn run_bot(
     let heading = random.unit() * std::f64::consts::TAU;
     let mut explored = 0.0_f64;
     let mut target = pos;
+    let mut home = spawn;
     let (mut hotbar_deadline, mut hotbar_step) = (None, 0usize);
     let mut next = Instant::now();
     let (joined, mut tick) = (Instant::now(), 0u64);
@@ -1321,9 +1379,21 @@ fn run_bot(
         }
         // A teleport from the server wins over where the bot thought it was.
         if let Some(at) = lock(&bot.teleport).take() {
+            // A roam bot walks about wherever it was put last (a respawn is far from where it died).
+            if behaviour == Behaviour::Roam && distance(at, pos) > 32.0 {
+                home = at;
+                target = at;
+            }
             pos = at;
         }
         let here = ((pos[0].floor() as i32) >> 4, (pos[2].floor() as i32) >> 4);
+        if tick % 20 == 0 {
+            let reach = i32::from(o.view_distance).max(2) - 1;
+            let held = lock(&bot.held);
+            let complete = (-reach..=reach)
+                .all(|dx| (-reach..=reach).all(|dz| held.contains(&(here.0 + dx, here.1 + dz))));
+            bot.ready.store(complete, Ordering::Relaxed);
+        }
         // The abusive client doesn't wait for its chunk, as a real client must.
         if behaviour == Behaviour::Hotbar {
             // Server time packets pace requests even during slow startup ticks.
@@ -1393,6 +1463,11 @@ fn run_bot(
                     }
                 }
                 Behaviour::Walk => walk_step(&mut pos, &mut target, spawn, cruise, &mut random),
+                Behaviour::Roam => {
+                    // On the ground the server chose: the height it gave, which a step leaves alone.
+                    let height = pos[1];
+                    walk_step(&mut pos, &mut target, home, height, &mut random);
+                }
                 Behaviour::Fight => {
                     let near = lock(&bot.entities).nearest(pos, o.pvp, &bots);
                     if let Some(near) = near {
@@ -1489,6 +1564,16 @@ fn run_bot(
                 );
             }
         }
+        for (at, command) in &o.run {
+            if *at == tick {
+                send(
+                    play::Serverbound::ChatCommand(play::ChatCommand {
+                        command: command.clone(),
+                    })
+                    .encode(),
+                );
+            }
+        }
         for (at, id, body) in &o.raw {
             if *at == tick {
                 send(raw(*id, |w| w.bytes(body)));
@@ -1558,7 +1643,8 @@ fn run_bot(
                 z: pos[2],
                 // Fight bots stand on the ground (but in a --crits jump); the others fly.
                 flags: u8::from(
-                    (matches!(behaviour, Behaviour::Fight | Behaviour::Stand) && !crits.airborne())
+                    (matches!(behaviour, Behaviour::Fight | Behaviour::Stand | Behaviour::Roam)
+                        && !crits.airborne())
                         || o.ground,
                 ),
             })
@@ -1580,6 +1666,14 @@ fn run_bot(
     bot.online.store(false, Ordering::SeqCst);
     lock(&writer).shutdown();
 }
+
+/// A SetHealth of 0 (or less) is a death: vanilla's client shows the death screen and a player respawns from it.
+fn wants_respawn(health: f32) -> bool {
+    health <= 0.0
+}
+
+/// A `stop` line arrived on standard input (--stdin-stop).
+static STOPPED: AtomicBool = AtomicBool::new(false);
 
 fn behaviour_of(mode: &str, index: usize) -> Behaviour {
     match mode {
@@ -1623,7 +1717,7 @@ fn main() {
     // The uuids of all bots, so that `--pvp false` leaves them alone.
     let bot_uuids: Arc<HashSet<u128>> = Arc::new(
         (0..o.bots)
-            .map(|i| offline_uuid(&format!("{}{i}", o.name)))
+            .map(|i| offline_uuid(&format!("{}{}", o.name, i + o.first_index)))
             .collect(),
     );
     let launcher = {
@@ -1642,6 +1736,19 @@ fn main() {
             handles
         })
     };
+    if o.stdin_stop {
+        let until = until.clone();
+        thread::spawn(move || {
+            for line in std::io::stdin().lines() {
+                if line.is_ok_and(|l| l.trim() == "stop") {
+                    *lock(&until) = Some(Instant::now());
+                    // The main loop sets the end once the first bot is in; keep it from moving this one.
+                    STOPPED.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        });
+    }
     // The run lasts --seconds after the first bot is in.
     let mut previous_chunks = 0;
     let mut first = None;
@@ -1658,7 +1765,9 @@ fn main() {
         let failed = bots.iter().filter(|b| lock(&b.error).is_some()).count();
         if first.is_none() && online > 0 {
             first = Some(Instant::now());
-            *lock(&until) = Some(Instant::now() + Duration::from_secs(o.seconds));
+            if !STOPPED.load(Ordering::SeqCst) {
+                *lock(&until) = Some(Instant::now() + Duration::from_secs(o.seconds));
+            }
         }
         println!(
             "{}",
@@ -1675,6 +1784,8 @@ fn main() {
                 "waited_ticks": total(|b| &b.waited),
                 "attacks": total(|b| &b.attacks),
                 // Bots whose far plan is done: every tile asked for and answered.
+                // Bots that hold their whole view (the chunks round them out to the view distance less one).
+                "ready": bots.iter().filter(|b| b.ready.load(Ordering::Relaxed)).count(),
                 "far_done": bots.iter().filter(|b| b.far.is_finished()).count(),
             })
         );
@@ -1705,6 +1816,7 @@ fn main() {
         "pulled_back": bots.iter().map(|b| b.pulled_back.load(Ordering::Relaxed)).sum::<u64>(),
         "waited_ticks": bots.iter().map(|b| b.waited.load(Ordering::Relaxed)).sum::<u64>(),
         "attacks": bots.iter().map(|b| b.attacks.load(Ordering::Relaxed)).sum::<u64>(),
+        "respawns": bots.iter().map(|b| b.respawns.load(Ordering::Relaxed)).sum::<u64>(),
         "bytes_in": bots.iter().map(|b| b.bytes_in()).sum::<u64>(),
         "bytes_out": bots.iter().map(|b| b.bytes_out()).sum::<u64>(),
         "join_time": join_summary(
@@ -1714,7 +1826,7 @@ fn main() {
                 .collect(),
         ),
         "per_bot": bots.iter().enumerate().map(|(i, b)| json!({
-            "name": format!("{}{i}", o.name),
+            "name": format!("{}{}", o.name, i + o.first_index),
             "behaviour": behaviour_of(&o.behaviour, i).name(),
             "joined_after_ms": b.joined_after_ms.load(Ordering::SeqCst),
             "bytes_in": b.bytes_in(),
@@ -1728,6 +1840,8 @@ fn main() {
             "explore_complete": b.explore_complete.load(Ordering::Relaxed),
             "error": *lock(&b.error),
             "attacks": b.attacks.load(Ordering::Relaxed),
+            "respawns": b.respawns.load(Ordering::Relaxed),
+            "ready": b.ready.load(Ordering::Relaxed),
             "health": *lock(&b.health),
             "far": (o.far > 0).then(|| b.far.report()),
         })).collect::<Vec<_>>(),
@@ -1869,6 +1983,50 @@ mod tests {
     #[test]
     fn vanilla_acks_remain_once_per_finished_batch() {
         check_chunk_acks(None);
+    }
+
+    /// A death (SetHealth 0) is answered with a respawn request (ClientCommand action 0); health above 0 is not.
+    #[test]
+    fn a_bot_respawns_when_its_health_reaches_zero() {
+        use horizon_protocol::connection::Pipe;
+        let (client, server) = Pipe::pair();
+        let (reader, writer) = Connection::local(client).split();
+        let mut server = Connection::local(server);
+        server
+            .reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let bot = Arc::new(Bot::default());
+        bot.online.store(true, Ordering::SeqCst);
+        let watched = bot.clone();
+        let handle = thread::spawn(move || {
+            read(reader, Arc::new(Mutex::new(writer)), bot, false, None, None)
+        });
+        let set_health = |health: f32| {
+            play::Clientbound::SetHealth(play::SetHealth {
+                health,
+                food: 20,
+                saturation: 5.0,
+            })
+            .encode()
+        };
+        let pong = |server: &mut Connection, nonce: i32| {
+            server
+                .send(&raw(ids::play::clientbound::PING, |w| w.i32(nonce)))
+                .unwrap();
+        };
+        server.send(&set_health(7.0)).unwrap();
+        pong(&mut server, 1);
+        assert_eq!(server.recv().unwrap().0, ids::play::serverbound::PONG);
+        server.send(&set_health(0.0)).unwrap();
+        pong(&mut server, 2);
+        let (id, body) = server.recv().unwrap();
+        assert_eq!(id, ids::play::serverbound::CLIENT_COMMAND);
+        assert_eq!(Reader::new(&body).varint().unwrap(), 0, "action 0: respawn");
+        assert_eq!(server.recv().unwrap().0, ids::play::serverbound::PONG);
+        assert_eq!(watched.respawns.load(Ordering::Relaxed), 1);
+        server.writer.shutdown();
+        handle.join().unwrap();
     }
 
     fn feed(entities: &mut Entities, packet: &Clientbound) {
