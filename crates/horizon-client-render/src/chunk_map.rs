@@ -495,8 +495,9 @@ impl ChunkMap {
         previous
     }
     /// Makes the grid serve the column at `key`, which is in `columns` already (what `insert` does after it adds
-    /// one): a map that was lent chunks, or got them back, reads them by `get` like any other.
-    fn cache_slot(&mut self, key: Key) {
+    /// one): a map that was lent chunks, or got them back, reads them by `get` like any other. `new` is whether
+    /// the column was not in `columns` before.
+    fn cache_slot(&mut self, key: Key, new: bool) {
         let Some(cached) = self.columns.get(&key).map(Arc::clone) else {
             return;
         };
@@ -510,13 +511,31 @@ impl ChunkMap {
             let idx = self.grid_idx(key.0, key.1);
             let packed = pack_key(key.0, key.1);
             let slot = &mut self.grid[idx];
-            if slot.chunk.is_some() && slot.key_packed != packed {
-                self.grid_complete = false;
+            match (new, slot.chunk.is_none()) {
+                (true, false) => self.grid_missing += 1,
+                (false, true) => self.grid_missing -= 1,
+                _ => {}
             }
             *slot = CachedSlot {
                 key_packed: packed,
                 chunk: Some(cached),
             };
+        }
+    }
+    /// Takes the grid's handle on a column that has just left `columns` (what `remove` does for it), keeping
+    /// the count of columns the grid does not hold exact.
+    fn forget_slot(&mut self, key: Key) {
+        let in_grid = self.grid_mask != 0 && {
+            let idx = self.grid_idx(key.0, key.1);
+            let slot = &mut self.grid[idx];
+            let held = slot.chunk.is_some() && slot.key_packed == pack_key(key.0, key.1);
+            if held {
+                slot.chunk = None;
+            }
+            held
+        };
+        if !in_grid {
+            self.grid_missing -= 1;
         }
     }
     pub fn remove(&mut self, key: &Key) -> Option<Arc<Chunk>> {
@@ -650,7 +669,7 @@ impl ChunkMap {
                 out[r].near.insert(key, n);
             }
             out[r].columns.insert(key, chunk);
-            out[r].cache_slot(key);
+            out[r].cache_slot(key, true);
         };
         match scope {
             // Only the chunks of `scope` can go: each is looked up, the map is not walked.
@@ -672,7 +691,7 @@ impl ChunkMap {
         // The grid kept a handle on each: a lent column must read as absent here, and a handle left behind would
         // also make the region's first write copy the whole column.
         for key in gone {
-            self.invalidate_slot(key);
+            self.forget_slot(key);
         }
         out
     }
@@ -690,8 +709,8 @@ impl ChunkMap {
         }
         self.fresh.extend(lent.fresh.drain());
         for (key, chunk) in lent.columns.drain() {
-            self.columns.insert(key, chunk);
-            self.cache_slot(key);
+            let new = self.columns.insert(key, chunk).is_none();
+            self.cache_slot(key, new);
         }
     }
     pub fn values_mut(&mut self) -> ValuesMut<'_, Key, Arc<Chunk>> {
