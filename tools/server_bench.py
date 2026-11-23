@@ -496,7 +496,10 @@ def server_command(kind, directory, args):
                    capture_output=True)
     toml = directory / 'server.toml'
     if getattr(args, 'world', None):
-        toml.write_text(harden_toml(toml.read_text(), bool(args.bots_via)))
+        # The copy's level.dat names the mods the real server ran (a code mod such as `smp`), which a bench box
+        # does not have: without this the game refuses to open the copy. The copy is thrown away, so it may lose
+        # those mods' blocks.
+        toml.write_text(harden_toml(toml.read_text(), bool(args.bots_via)) + '\n[missing_mods]\nallow = true\n')
     # The same settings, without the web panel.
     toml.write_text(re.sub(r'(?m)^bind = "127\.0\.0\.1:8130"', 'bind = ""', toml.read_text()))
     if args.anticheat:
