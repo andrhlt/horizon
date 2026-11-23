@@ -137,6 +137,54 @@ class FamilyTests(unittest.TestCase):
                 self.assertTrue(any(op.get('read') for op in fuzz.render(scenario, 1)), (name, seed))
 
 
+class StackTests(unittest.TestCase):
+    step = {'k': 'stack', 'how': 'with', 'at': [7, 2, 7], 'item': 'minecraft:iron_pickaxe', 'count': 1,
+            'nbt': {'minecraft:damage': '0', 'minecraft:lore': None}}
+
+    def test_a_stack_renders_as_a_command_argument_and_as_saved_nbt(self):
+        self.assertEqual(fuzz.stack_command(self.step, '1 2 3'), '/item replace block 1 2 3 container.0 with '
+                         'minecraft:iron_pickaxe[minecraft:damage=0,!minecraft:lore] 1')
+        saved = '{Slot:0b,id:"minecraft:iron_pickaxe",count:1,components:{"minecraft:damage":0,"!minecraft:lore":{}}}'
+        self.assertEqual(fuzz.stack_command({**self.step, 'how': 'nbt', 'block': 'barrel'}, '1 2 3'),
+                         f'/setblock 1 2 3 barrel{{Items:[{saved}]}}')
+        self.assertEqual(fuzz.stack_command({**self.step, 'how': 'merge'}, '1 2 3'),
+                         f'/data merge block 1 2 3 {{Items:[{saved}]}}')
+        self.assertIn('{type:"minecraft:set_components",components:{"minecraft:damage":0,"!minecraft:lore":{}}}',
+                      fuzz.stack_command({**self.step, 'how': 'loot'}, '1 2 3'))
+        self.assertEqual(fuzz.stack_command({**self.step, 'nbt': {}}, '1 2 3'),
+                         '/item replace block 1 2 3 container.0 with minecraft:iron_pickaxe 1')
+
+    def test_a_patch_entry_shrinks_away_and_a_command_keeps_its_own_braces(self):
+        scenario = {'family': 'items', 'seed': 1, 'steps': [
+            self.step, {'k': 'cmd', 'cmd': '/execute if items block {0} container.0 *[minecraft:custom_data~{a:1b}]',
+                        'at': [[7, 2, 7]], 'subject': 'if_items/partial'},
+            {'k': 'read_block', 'at': [7, 2, 7], 'path': 'Items', 'subject': 'with'}]}
+        self.assertIn(('nbt', 0, 'minecraft:lore'), list(fuzz.edits(scenario)))
+        commands = [op['cmd'] for op in fuzz.render(scenario, 0) if op.get('step', -1) >= 0]
+        self.assertEqual(commands[1], '/execute if items block 4103 302 4103 container.0 *[minecraft:custom_data~{a:1b}]')
+        self.assertEqual(commands[2], '/data get block 4103 302 4103 Items')
+        self.assertEqual(fuzz.subject(scenario, scenario['steps'][2]), 'with')
+
+    def test_a_merge_goes_into_the_block_already_placed(self):
+        scenario = {'family': 'blockdata', 'seed': 1, 'steps': [
+            {'k': 'block', 'block': 'chest', 'at': [7, 0, 7]},
+            {'k': 'block', 'block': 'chest', 'at': [7, 0, 7], 'nbt': {'CustomName': '"fz"'}, 'merge': True},
+            {'k': 'read_block', 'at': [7, 0, 7]}]}
+        commands = [op['cmd'] for op in fuzz.render(scenario, 0) if op.get('step', -1) >= 0]
+        self.assertEqual(commands[:2], ['/setblock 4103 300 4103 chest',
+                                        '/data merge block 4103 300 4103 {CustomName:"fz"}'])
+
+    def test_prototype_values_become_snbt(self):
+        from tools import parity_fuzz_data as data
+        self.assertEqual(data.to_snbt({'a': [1, 2.5, True, 'x"y'], 'minecraft:b': {}}),
+                         '{"a":[1,2.5d,true,"x\\"y"],"minecraft:b":{}}')
+        rng = random.Random(3)
+        patched = data.patch(rng, {'minecraft:max_stack_size': 64, 'minecraft:lore': []})
+        self.assertTrue(patched and all(value is None or isinstance(value, str) for value in patched.values()))
+        self.assertEqual(data.mistype(random.Random(1), '"x"'), '7')
+        self.assertNotEqual(data.mistype(random.Random(1), '5L'), '5L')
+
+
 class ShulkerHitTests(unittest.TestCase):
     def test_live_bullet_scenario_requires_the_vanilla_target_to_take_damage(self):
         scenario = families.shulker(random.Random(10), 10)
