@@ -541,7 +541,8 @@ impl World {
         self.seam_light.retain(|c| chunks.contains_key(c));
         let mut ready = Vec::new();
         self.seam_light.retain(|&(x, z)| {
-            let whole = (-1..=1).all(|dz| (-1..=1).all(|dx| chunks.contains_key(&(x + dx, z + dz))));
+            let whole =
+                (-1..=1).all(|dz| (-1..=1).all(|dx| chunks.contains_key(&(x + dx, z + dz))));
             if whole {
                 ready.push((x, z));
             }

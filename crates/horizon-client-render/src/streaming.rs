@@ -2597,9 +2597,8 @@ impl Streaming {
         if self.own.is_some() {
             for p in &positions {
                 let (cx, cz) = (p.0 >> 4, p.2 >> 4);
-                let beside_gap = (-1..=1).any(|dz| {
-                    (-1..=1).any(|dx| !world.chunks.contains_key(&(cx + dx, cz + dz)))
-                });
+                let beside_gap = (-1..=1)
+                    .any(|dz| (-1..=1).any(|dx| !world.chunks.contains_key(&(cx + dx, cz + dz))));
                 if beside_gap {
                     world.seam_light.insert((cx, cz));
                 }

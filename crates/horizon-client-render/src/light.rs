@@ -1685,7 +1685,14 @@ pub(crate) mod tests {
         // The level that held every chunk.
         let mut whole = before.clone();
         apply(&mut whole);
-        relight(&mut whole, &t, true, &fill, false, &mut LightChanges::default());
+        relight(
+            &mut whole,
+            &t,
+            true,
+            &fill,
+            false,
+            &mut LightChanges::default(),
+        );
         // The region that held the west chunks only: the light sent east is lost.
         let mut region: HashMap<_, _> = before
             .iter()
@@ -1693,7 +1700,14 @@ pub(crate) mod tests {
             .map(|(k, c)| (*k, c.clone()))
             .collect();
         apply(&mut region);
-        relight(&mut region, &t, true, &fill, false, &mut LightChanges::default());
+        relight(
+            &mut region,
+            &t,
+            true,
+            &fill,
+            false,
+            &mut LightChanges::default(),
+        );
         assert_ne!(
             block(&region, 0, 0, 5),
             0,
@@ -1701,7 +1715,12 @@ pub(crate) mod tests {
         );
         // The east chunks come in; the chunks around the fill are lit again from the blocks.
         let mut merged = region;
-        merged.extend(before.iter().filter(|((x, _), _)| *x > 0).map(|(k, c)| (*k, c.clone())));
+        merged.extend(
+            before
+                .iter()
+                .filter(|((x, _), _)| *x > 0)
+                .map(|(k, c)| (*k, c.clone())),
+        );
         let around: Vec<(i32, i32)> = (-1..=1)
             .flat_map(|z| (-1..=1).map(move |x| (x, z)))
             .collect();
@@ -1709,7 +1728,11 @@ pub(crate) mod tests {
             .iter()
             .map(|&(x, z)| {
                 let r: [[Option<&Chunk>; 3]; 3] = std::array::from_fn(|dz| {
-                    std::array::from_fn(|dx| merged.get(&(x + dx as i32 - 1, z + dz as i32 - 1)).map(|c| &**c))
+                    std::array::from_fn(|dx| {
+                        merged
+                            .get(&(x + dx as i32 - 1, z + dz as i32 - 1))
+                            .map(|c| &**c)
+                    })
                 });
                 let mut c = (*merged[&(x, z)]).clone();
                 apply_lighting(&mut c, light_chunk(&r, &t, true));
