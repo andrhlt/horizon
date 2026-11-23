@@ -253,6 +253,21 @@ class StackTests(unittest.TestCase):
         self.assertEqual(merged['totals']['scenarios'], 100)
         self.assertEqual(merged['groups']['items|with|live|x']['seeds'], [3, 3])
 
+    def test_a_merge_takes_slices_own_found_files_each_named_by_its_folder(self):
+        import tempfile
+        from tools import parity_fuzz_probe as probe
+        found = json.dumps({'scenarios': 25, 'invalid': [], 'refused': [[4, '/x']], 'groups': [
+            {'signature': 'commands|cmd/x|live|y', 'seeds': [4], 'where': [[4, '/x', [['y', '1', None]]]]}]})
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder) / f'parity-fuzz-results-{runner}' / f'slice-{first}' / 'found.json'
+                     for runner, first in ((1, 1), (1, 26), (2, 201))]
+            for path in paths:
+                path.parent.mkdir(parents=True)
+                path.write_text(found, encoding='utf-8')
+            merged = probe.merge(paths)
+        self.assertEqual(merged['totals'], {'scenarios': 75, 'invalid': 0, 'refused': 3})
+        self.assertEqual(list(merged['clusters']), ['commands|cmd/x|y|only vanilla'])
+
     def test_a_merge_takes_the_retry_when_the_first_run_stopped_without_a_result(self):
         import tempfile
         from tools import parity_fuzz_probe as probe

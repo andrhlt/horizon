@@ -210,6 +210,7 @@ python3 tools/parity_fuzz.py --replay scenarios.json                            
   run([['items', '--ordinary', '--seed', '1', '--count', '200', '--batch', '25', '--shrink-rounds', '0'],
        ['items', '--seed', '318', '--count', '1', '--shrink-rounds', '3']])
   ```
+- **A workflow of its own.** `parity-fuzz.yml` (docs/ci-runners.md, "The fuzzer's workflow") needs no probe branch or stub: `gh workflow run parity-fuzz.yml --ref <branch> -f family=commands -f seed=1 -f count=200 -f runners=2` builds the game once, runs 8 slices of `count` seeds on each runner (`tools/parity_fuzz_probe.py slices`), and its summary job merges every slice's `found.json` into the clusters. A slice that found differences is a result; the run fails only when a slice compared nothing. An entity's `Tags` are compared as a set (vanilla keeps them in a hash set).
 - **Triage before filing.** A group is a lead, not a bug: read the vanilla source for the field, check it isn't a seed-sync limit (above) or harness noise, and search existing issues first.
 
 ## Reading vanilla

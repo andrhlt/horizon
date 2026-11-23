@@ -5,12 +5,19 @@ main) adds `tools/test_fuzz_probe_parity.py`, which hands its slices to `run`: e
 output and its `found.json` and `report.json`, and fails. docs/parity-workflow.md, "Fuzzing scenarios", has the stub.
 
     python3 tools/parity_fuzz_probe.py merge LOGS...   # the shards' downloaded logs as one table of groups
+
+parity-fuzz.yml needs no probe branch: its fuzz jobs run `slices` (slices of one family side by side against a game
+built by another job) and its summary merges their `found.json` files.
 """
+import argparse
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,6 +54,47 @@ def run(slices):
     kept.write_text(text, encoding='utf-8')
     print(text)
     sys.exit(1)
+
+
+def slices(args):
+    """`args.slices` slices of one family side by side, each with a work folder and a game home of its own; what each
+    printed and found goes to `args.out`/slice-<first seed>/. Exits 1 when a slice compared nothing."""
+    running = []
+    for index in range(args.slices):
+        first = args.seed + index * args.count
+        work, kept = ROOT / '.local' / 'parity-fuzz' / f'slice-{first}', args.out / f'slice-{first}'
+        shutil.rmtree(work, ignore_errors=True)
+        (work / 'home').mkdir(parents=True)
+        kept.mkdir(parents=True, exist_ok=True)
+        command = [sys.executable, str(ROOT / 'tools/parity_fuzz.py'), args.family, '--seed', str(first),
+                   '--count', str(args.count), '--batch', '25', '--shrink-rounds', str(args.shrink_rounds),
+                   '--binary', str(args.binary), '--work-dir', str(work)] + (['--ordinary'] if args.ordinary else [])
+        log = (kept / 'output.txt').open('w', encoding='utf-8')
+        # A session of its own: a slice stopped at the limit takes its harness, game and oracle with it.
+        process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+                                   env={**os.environ, 'HORIZON_HOME': str(work / 'home')})
+        running.append((first, work, kept, log, process))
+    deadline, lost = time.monotonic() + args.limit, []
+    for first, work, kept, log, process in running:
+        try:
+            process.wait(max(1.0, deadline - time.monotonic()))
+            ended = f'exited {process.returncode}'
+        except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            ended = f'stopped after {args.limit} s'  # what it found by then is in found.json, written before it shrinks
+        log.close()
+        for name in ('found.json', 'report.json'):
+            if (work / name).exists():
+                shutil.copy(work / name, kept / name)
+        logs = sorted(work.glob('batch-*/harness.log'))
+        if not (kept / 'found.json').exists():
+            lost.append(first)
+            if logs:  # nothing compared: the last batch's log says why
+                (kept / 'harness-tail.txt').write_text(logs[-1].read_text(encoding='utf-8', errors='replace')[-6000:],
+                                                       encoding='utf-8')
+        print(f'slice {first}: {ended}, {len(logs)} harness runs' + ('' if first not in lost else ', NO RESULT'), flush=True)
+    sys.exit(f'{len(lost)} slices compared nothing: {lost}' if lost else 0)
 
 
 def section(text, name):
@@ -90,9 +138,13 @@ def merge(paths):
     # slice that passed is a result too.
     shards = {}
     for path in sorted(paths, key=lambda p: str(p).endswith('.first-run.log')):
-        shards.setdefault(re.sub(r'(\.first-run)?\.log$', '', Path(path).name), []).append(path)
+        own = Path(path).name == 'found.json'  # a slice's file itself (parity-fuzz.yml), named by its folder
+        shards.setdefault(str(Path(path).parent) if own else re.sub(r'(\.first-run)?\.log$', '', Path(path).name),
+                          []).append(path)
     for logs in shards.values():
         texts = [Path(path).read_text(encoding='utf-8', errors='replace') for path in logs]
+        texts = ['=== found.json ===\n' + text if Path(path).name == 'found.json' else text
+                 for path, text in zip(logs, texts)]
         path, text = next(((p, t) for p, t in zip(logs, texts)
                            if section(t, 'found.json') is not None or smoke_passed(t)),
                           (logs[-1], texts[-1]))
@@ -112,10 +164,25 @@ def merge(paths):
             'groups': dict(sorted(groups.items(), key=lambda item: -len(item[1]['seeds'])))}
 
 
-if __name__ == '__main__':
-    if len(sys.argv) < 3 or sys.argv[1] != 'merge':
-        sys.exit(__doc__)
-    merged = merge(sys.argv[2:])
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('merge').add_argument('logs', nargs='+', type=Path)
+    run_slices = commands.add_parser('slices')
+    run_slices.add_argument('--family', required=True,
+                            choices=['blockdata', 'commands', 'items', 'persist', 'retype', 'shulker', 'spawn'])
+    run_slices.add_argument('--seed', type=int, required=True, help='the first seed of the first slice')
+    run_slices.add_argument('--count', type=int, required=True, help='seeds per slice')
+    run_slices.add_argument('--slices', type=int, default=8)
+    run_slices.add_argument('--shrink-rounds', type=int, default=0)
+    run_slices.add_argument('--ordinary', action='store_true')
+    run_slices.add_argument('--binary', type=Path, required=True, help='the built Horizon game')
+    run_slices.add_argument('--out', type=Path, required=True)
+    run_slices.add_argument('--limit', type=int, default=4200, help='seconds before a slice is stopped')
+    args = parser.parse_args()
+    if args.command == 'slices':
+        slices(args)
+    merged = merge(args.logs)
     print(json.dumps({'totals': merged['totals'], 'lost': merged['lost'], 'distinct': len(merged['groups'])}))
     print('clusters (family, step, field, how it differs): seeds, then one seed with its command, vanilla, Horizon')
     for key, members in merged['clusters'].items():
@@ -125,3 +192,7 @@ if __name__ == '__main__':
     for signature, entry in merged['groups'].items():
         print(f'{len(entry["seeds"]):5d}  {signature}  seeds {sorted(entry["seeds"])[:6]}')
         print(f'         {json.dumps(entry["where"])[:400]}')
+
+
+if __name__ == '__main__':
+    main()
