@@ -956,7 +956,11 @@ impl Game<'_> {
             else {
                 return (Some(stack), false);
             };
-            let item = tag.get("item").and_then(save::item_from_nbt);
+            let mut item = tag.get("item").and_then(save::item_from_nbt);
+            // The pot keeps its item as saved NBT: taken in against this world's prototypes.
+            if let Some(stack) = item.as_mut() {
+                self.clean_stack(stack);
+            }
             Some((tag, item))
         } else {
             None
