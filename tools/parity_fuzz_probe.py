@@ -8,6 +8,7 @@ output and its `found.json` and `report.json`, and fails. docs/parity-workflow.m
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -59,10 +60,26 @@ def section(text, name):
         return None
 
 
+def cluster(signature, where):
+    """A coarser key than the signature, which names the first differing field with its ids and indices: the family,
+    the step, the field without them and how it differs (only one engine has it, the tag type, the value)."""
+    family, subject, _, field = (signature.split('|', 3) + ['', '', ''])[:4]
+    kind = 'value'
+    first = where[2][0] if len(where) > 2 and where[2] and isinstance(where[2][0], list) else None
+    if first and len(first) > 2:
+        field, vanilla, horizon = first[:3]
+        number = re.compile(r'(-?[\d.]+?)(?:\.0)?[bsLfd]?')
+        if vanilla is None or horizon is None:
+            kind = 'only horizon' if vanilla is None else 'only vanilla'
+        elif isinstance(vanilla, str) and isinstance(horizon, str) and number.fullmatch(vanilla)                 and number.fullmatch(horizon) and number.fullmatch(vanilla)[1] == number.fullmatch(horizon)[1]:
+            kind = 'tag type'
+    return f'{family}|{subject}|{re.sub(r"[\[(]\d+[\])]", "[]", str(field))}|{kind}'
+
+
 def merge(paths):
     """The shards' groups as one: per signature its seeds and one seed's first difference. A log without found.json
     is a shard that compared nothing (it hung or crashed): lost, not clean."""
-    groups, totals, lost = {}, {'scenarios': 0, 'invalid': 0, 'refused': 0}, []
+    groups, clusters, totals, lost = {}, {}, {'scenarios': 0, 'invalid': 0, 'refused': 0}, []
     for path in paths:
         text = Path(path).read_text(encoding='utf-8', errors='replace')
         found = section(text, 'found.json')
@@ -75,7 +92,9 @@ def merge(paths):
         for group in found['groups']:
             entry = groups.setdefault(group['signature'], {'seeds': [], 'where': group['where'][0]})
             entry['seeds'] += group['seeds']
-    return {'totals': totals, 'lost': lost,
+            for where in group['where']:
+                clusters.setdefault(cluster(group['signature'], where), []).append(where)
+    return {'totals': totals, 'lost': lost, 'clusters': dict(sorted(clusters.items(), key=lambda item: -len(item[1]))),
             'groups': dict(sorted(groups.items(), key=lambda item: -len(item[1]['seeds'])))}
 
 
@@ -84,6 +103,11 @@ if __name__ == '__main__':
         sys.exit(__doc__)
     merged = merge(sys.argv[2:])
     print(json.dumps({'totals': merged['totals'], 'lost': merged['lost'], 'distinct': len(merged['groups'])}))
+    print('clusters (family, step, field, how it differs): seeds, then one seed with its command, vanilla, Horizon')
+    for key, members in merged['clusters'].items():
+        print(f'{len(members):5d}  {key}  seeds {sorted({m[0] for m in members})[:6]}')
+        print(f'         {json.dumps(members[0])[:400]}')
+    print('signatures')
     for signature, entry in merged['groups'].items():
         print(f'{len(entry["seeds"]):5d}  {signature}  seeds {sorted(entry["seeds"])[:6]}')
         print(f'         {json.dumps(entry["where"])[:400]}')

@@ -185,6 +185,29 @@ class StackTests(unittest.TestCase):
         self.assertNotEqual(data.mistype(random.Random(1), '5L'), '5L')
 
 
+    def test_ordinary_inputs_keep_to_command_built_stacks_and_values_vanilla_saves(self):
+        from tools import parity_fuzz_data as data
+        data.EDGES = False
+        try:
+            for seed in range(60):
+                routes = [step['how'] for step in data.items(random.Random(seed), seed)['steps'] if step['k'] == 'stack']
+                self.assertTrue(set(routes) <= {'with', 'modify', 'loot'}, routes)
+                placed = [step for step in data.blockdata(random.Random(seed), seed)['steps'] if step.get('nbt')]
+                for step in placed:
+                    block = step['block']
+                    self.assertTrue(all(value == data.BLOCKS[block][key][0] for key, value in step['nbt'].items()))
+        finally:
+            data.EDGES = True
+
+    def test_shard_logs_merge_into_clusters_by_field_and_kind_of_difference(self):
+        from tools import parity_fuzz_probe as probe
+        where = [7, '/data get block 1 2 3 Items', [['[0].components.minecraft:food.saturation', '8.0d', '8.0f']]]
+        self.assertEqual(probe.cluster('items|with|live|[0].components', where),
+                         'items|with|[].components.minecraft:food.saturation|tag type')
+        where[2][0][1:] = [None, '{}']
+        self.assertTrue(probe.cluster('items|with|live|x', where).endswith('|only horizon'))
+
+
 class CommandTreeTests(unittest.TestCase):
     tree = {'type': 'root', 'children': {
         'kill': {'type': 'literal', 'executable': True, 'children': {

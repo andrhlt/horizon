@@ -536,6 +536,8 @@ def main():
     source.add_argument('--smoke', action='store_true', help='fixed scenarios that must match: the tool works')
     parser.add_argument('--batch', type=int, default=40, help='scenarios per harness run')
     parser.add_argument('--shrink-rounds', type=int, default=6)
+    parser.add_argument('--ordinary', action='store_true',
+                        help='items, blockdata, commands: only what a command or a played world gives')
     parser.add_argument('--binary', type=Path, help='an already built Horizon game')
     parser.add_argument('--work-dir', type=Path, default=lab.LOCAL / 'parity-fuzz')
     args = parser.parse_args()
@@ -545,6 +547,7 @@ def main():
     if args.smoke or args.replay:
         scenarios = SMOKE if args.smoke else json.loads(args.replay.read_text(encoding='utf-8'))
     else:
+        families.parity_fuzz_data.EDGES = not args.ordinary
         families.prepare(args.family, runner, work)
         scenarios = [families.FAMILIES[args.family](random.Random(seed), seed)
                      for seed in range(args.seed, args.seed + args.count)]

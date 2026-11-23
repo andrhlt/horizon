@@ -173,13 +173,17 @@ PARTIAL = {
     'minecraft:written_book_content': ['{author:"a"}', '{generation:{min:1}}', '{resolved:false}'],
 }
 CONTAINERS = ['barrel', 'barrel', 'chest', 'dispenser', 'shulker_box']
+# False (`--ordinary`): only what a command or a played world gives. No wrong tag types, unknown ids, counts over the
+# limit or hand-written NBT of a saved stack, whose differences otherwise lead every round.
+EDGES = True
 
 
 def patch(rng, prototype):
     """One to three patch entries: {component: SNBT value, or None for a removal}."""
     out = {}
     for _ in range(rng.randint(1, 3)):
-        kind = rng.choice(['equal', 'equal', 'changed', 'changed', 'removed', 'absent'])
+        kind = rng.choice(['equal', 'equal', 'changed', 'changed', 'removed', 'absent'] if EDGES
+                          else ['equal', 'changed', 'changed', 'changed', 'removed'])
         if kind == 'equal' and prototype:
             key = rng.choice(sorted(prototype))
             out[key] = to_snbt(prototype[key])
@@ -189,7 +193,7 @@ def patch(rng, prototype):
             out[rng.choice(sorted(set(VALUES) - set(prototype)))] = None
         else:
             # Half from the game's data: another item's value for a component, whatever the component is.
-            pool = GAME if GAME and rng.random() < 0.5 else VALUES
+            pool = GAME if GAME and (not EDGES or rng.random() < 0.5) else VALUES
             key = rng.choice(sorted(pool))
             out[key] = rng.choice(pool[key])
     return out
@@ -202,7 +206,7 @@ def predicate(rng, item, count, patched, prototype):
     key = rng.choice(keys)
     if kind == 'exact':
         values = ([patched[key]] if patched.get(key) is not None else []) \
-            + ([to_snbt(prototype[key])] if key in prototype else []) + VALUES.get(key, [])
+            + ([to_snbt(prototype[key])] if key in prototype else []) + (VALUES.get(key, []) if EDGES else [])
         test = f'{key}={rng.choice(values)}' if values else key
     elif kind == 'exists':
         test = key
@@ -223,13 +227,14 @@ def items(rng, seed):
     prototype = PROTOTYPES.get(name, {})
     patched = patch(rng, prototype)
     # Command-built stacks first: decoding a saved stack (`nbt`, `merge`, `entity`) is one code path of its own.
-    route = rng.choice(['with', 'with', 'with', 'with', 'modify', 'modify', 'loot', 'nbt', 'merge', 'entity'])
-    after = rng.choice([None, 'reload', 'reload', 'copy', 'hopper', 'drop', 'count', 'edit'])
+    route = rng.choice(['with', 'with', 'with', 'with', 'modify', 'modify', 'loot']
+                       + (['nbt', 'merge', 'entity'] if EDGES else ['loot']))
+    after = rng.choice([None, 'reload', 'reload', 'copy', 'hopper', 'drop', 'count'] + (['edit'] if EDGES else []))
     if route == 'entity' and after not in (None, 'reload'):
         after = 'reload'
     # Within the prototype's stack limit, but for one stack in ten: a count vanilla refuses is a comparison too, and
     # a patch can raise the limit.
-    limit = 64 if rng.random() < 0.1 else prototype.get('minecraft:max_stack_size', 64)
+    limit = 64 if EDGES and rng.random() < 0.1 else prototype.get('minecraft:max_stack_size', 64)
     count = rng.choice([n for n in ([1, 2] if after == 'hopper' else [1, 1, 2, 16, 64]) if n <= limit])
     a, hopper, b, c = [7, 2, 7], [7, 1, 7], [7, 0, 7], [9, 0, 7]
     stack = {'k': 'stack', 'how': route, 'at': a, 'item': name, 'count': count, 'nbt': patched, 'setup': True,
@@ -434,11 +439,12 @@ def mistype(rng, value):
 def blockdata(rng, seed):
     """One block entity with one to three optional fields, by /setblock or /data merge; read, reloaded, read."""
     block = rng.choice(sorted(BLOCKS))
-    fields = {**BLOCKS[block], **ANY}
+    fields = {**BLOCKS[block], **ANY} if EDGES else BLOCKS[block]
     nbt = {}
     for key in sorted(rng.sample(sorted(fields), min(len(fields), rng.randint(1, 3)))):
-        value = rng.choice(fields[key])
-        nbt[key] = mistype(rng, value) if rng.random() < 0.2 else value
+        # Each pool's first value is the one vanilla saves itself.
+        value = rng.choice(fields[key]) if EDGES else fields[key][0]
+        nbt[key] = mistype(rng, value) if EDGES and rng.random() < 0.2 else value
     c = [7, 0, 7]
     route = rng.choice(['set', 'set', 'merge'])
     if route == 'set':
