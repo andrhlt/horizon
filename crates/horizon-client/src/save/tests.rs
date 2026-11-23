@@ -2616,6 +2616,44 @@ fn mod_block_entity_round_trips() {
         block_entity_encode::encode(pos, &back, "gtmod:macerator"),
         saved
     );
+    // Taken in against the world's prototypes the slots are canonical, and a save over
+    // the loaded tag writes them so, keeping every other field as loaded.
+    let snbt = |text: &str| horizon_core::nbt::parse_snbt(text).unwrap().0;
+    let Tag::Compound(ore) = snbt(r#"{"minecraft:max_stack_size":64}"#) else {
+        unreachable!()
+    };
+    let prototypes =
+        crate::item_data::ItemPrototypes::from([("minecraft:iron_ore".to_owned(), ore)]);
+    let slot =
+        r#"{Slot:0b,id:"minecraft:iron_ore",count:3,components:{"minecraft:max_stack_size":64}}"#;
+    let clean_slot = r#"{Slot:0b,id:"minecraft:iron_ore",count:3}"#;
+    let source = snbt(&format!(
+        r#"{{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,Items:[{slot}]}}"#
+    ));
+    let (pos, mut back) = decode_block_entity(&source).expect("mod block entity");
+    assert!(back.clean_stacks(&prototypes));
+    assert!(
+        !back.clean_stacks(&prototypes),
+        "a second clean changes nothing"
+    );
+    assert_eq!(
+        full_block_entity_data(pos, &back, "gtmod:macerator", Some(&source), None, None),
+        snbt(&format!(
+            r#"{{id:"gtmod:macerator",x:5,y:-60,z:12,energy:1200L,Items:[{clean_slot}]}}"#
+        ))
+    );
+    // A chest: a key Horizon does not model survives with the cleaned slot.
+    let source = snbt(&format!(
+        r#"{{id:"minecraft:chest",x:0,y:0,z:0,"horizon:note":1b,Items:[{slot}]}}"#
+    ));
+    let (pos, mut chest) = decode_block_entity(&source).expect("chest");
+    assert!(chest.clean_stacks(&prototypes));
+    let saved = full_block_entity_data(pos, &chest, "minecraft:chest", Some(&source), None, None);
+    assert_eq!(saved.get("horizon:note"), Some(&Tag::Byte(1)));
+    let Some(Tag::List(items)) = saved.get("Items") else {
+        panic!("chest items")
+    };
+    assert_eq!(items.as_slice(), [snbt(clean_slot)].as_slice());
     // `Items` that are not an item list stay the mod's, as saved.
     for items in [
         r#"Items:{energy:5}"#,

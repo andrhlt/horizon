@@ -2197,18 +2197,43 @@ pub fn decode_components_for_item(
     (damage, extra)
 }
 
+/// The item prototypes of one game, by item id (`Items::component_defaults`).
+pub type ItemPrototypes = std::collections::HashMap<String, horizon_core::nbt::Compound>;
+
+/// A saved stack as the game that owns `prototypes` takes it in (`ItemStack.CODEC`
+/// decodes through `applyPatch`): [`drop_prototype_values`] against its item's prototype.
+/// True when something left the patch.
+pub fn clean_stack(stack: &mut ItemStack, prototypes: &ItemPrototypes) -> bool {
+    prototypes
+        .get(&*stack.item)
+        .is_some_and(|prototype| drop_prototype_values(stack, prototype))
+}
+
+/// [`clean_stack`] on each of `stacks`; true when one changed.
+pub fn clean_stacks<'a>(
+    stacks: impl IntoIterator<Item = &'a mut ItemStack>,
+    prototypes: &ItemPrototypes,
+) -> bool {
+    stacks.into_iter().fold(false, |changed, stack| {
+        clean_stack(stack, prototypes) | changed
+    })
+}
+
 /// `PatchedDataComponentMap.applyPatch` and `set`: a component whose value
 /// equals the item's `prototype` (`Items::component_defaults`) is no part of
 /// the stack's patch, nor is the removal of a component it lacks. Differing
 /// values and removals of its own components stay. Call this where a
 /// stack is built with the item registry at hand. The context-free codecs
-/// have no prototype to compare against.
-pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nbt::Compound) {
+/// have no prototype to compare against. True when something left the patch.
+pub fn drop_prototype_values(
+    stack: &mut ItemStack,
+    prototype: &horizon_core::nbt::Compound,
+) -> bool {
     let Some(Tag::Compound(mut patch)) = components_tag(stack.damage, stack.data()) else {
-        return;
+        return false;
     };
     if !prototype_patch(&mut patch, prototype) {
-        return;
+        return false;
     }
     let old = stack.extra.take();
     let patch = (!patch.is_empty()).then_some(Tag::Compound(patch));
@@ -2222,6 +2247,7 @@ pub fn drop_prototype_values(stack: &mut ItemStack, prototype: &horizon_core::nb
         data.map_post_processing = old.map_post_processing;
         data.bundle_selected = old.bundle_selected;
     }
+    true
 }
 
 /// The `applyPatch` rule on a saved patch: drop each value equal to the

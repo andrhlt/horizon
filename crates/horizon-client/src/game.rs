@@ -8003,9 +8003,7 @@ impl Game<'_> {
     fn load_saved_inventory(&mut self, level: &Level) -> Vec<Option<ItemStack>> {
         let prototypes = self.items().component_defaults.clone();
         let canonical = |mut stack: ItemStack| {
-            if let Some(prototype) = prototypes.get(&*stack.item) {
-                horizon_client::item_data::drop_prototype_values(&mut stack, prototype);
-            }
+            horizon_client::item_data::clean_stack(&mut stack, &prototypes);
             stack
         };
         let mut inventory = vec![None; 36];

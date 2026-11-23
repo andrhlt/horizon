@@ -2651,6 +2651,24 @@ pub struct SpawnSetup {
 include!("mobs/seen.rs");
 
 impl Mob {
+    /// Its saved stacks as the game that owns `prototypes` takes them in
+    /// (`ItemStack.CODEC`, `applyPatch`): its equipment, chest, carried inventory, an
+    /// allay's item and a trader's results. A trade's costs are `ItemCost` predicates,
+    /// not stacks: they keep what they require.
+    pub fn clean_stacks(&mut self, prototypes: &crate::item_data::ItemPrototypes) {
+        use crate::item_data::clean_stacks;
+        let extra = &mut self.extra;
+        clean_stacks(extra.equipment.iter_mut().flatten(), prototypes);
+        clean_stacks(extra.items.iter_mut().flatten(), prototypes);
+        clean_stacks(&mut extra.inventory, prototypes);
+        if let Some(allay) = extra.allay.as_mut() {
+            clean_stacks(allay.inventory.as_mut(), prototypes);
+        }
+        if let Some(trade) = extra.trade.as_mut() {
+            clean_stacks(trade.offers.iter_mut().map(|o| &mut o.result), prototypes);
+        }
+    }
+
     /// The name used by command replies: CustomName, style and all, comes before the type.
     pub fn command_name(&self) -> crate::text::Text {
         villager::command_name(self)

@@ -76,8 +76,13 @@ pub fn with_warden(guest: &mut Guest, tracker: Option<Tag>) -> &mut Guest {
 
 /// `PlayerDataStorage.load`: a guest's saved state, if they have been here
 /// before. The player's file, else its `.dat_old` (what a save cut off
-/// between its two renames leaves, `write_dat`).
-pub fn load(guest: &mut Guest, world: &Path) -> bool {
+/// between its two renames leaves, `write_dat`). Its stacks are built against
+/// `prototypes`, the item prototypes of the game that owns the world.
+pub fn load(
+    guest: &mut Guest,
+    world: &Path,
+    prototypes: &crate::item_data::ItemPrototypes,
+) -> bool {
     let file = path(world, guest.uuid);
     let Some(tag) = read_dat(&file).or_else(|| read_dat(&file.with_extension("dat_old"))) else {
         return false;
@@ -90,7 +95,7 @@ pub fn load(guest: &mut Guest, world: &Path) -> bool {
     };
     level.read_player(&tag);
     level.player_extra = Some(tag);
-    apply(guest, &level);
+    apply(guest, &level, prototypes);
     true
 }
 
@@ -102,16 +107,21 @@ pub fn load(guest: &mut Guest, world: &Path) -> bool {
 /// world opening found instead (the newest player file, the legacy
 /// `Data.Player`, or nothing in a new world). Returns whether the player has
 /// been in this world before.
-pub fn load_owner(guest: &mut Guest, world: &Path, saved: Option<&Level>) -> bool {
+pub fn load_owner(
+    guest: &mut Guest,
+    world: &Path,
+    saved: Option<&Level>,
+    prototypes: &crate::item_data::ItemPrototypes,
+) -> bool {
     if let Some(level) = saved.filter(|l| l.singleplayer_file) {
-        apply(guest, level);
+        apply(guest, level, prototypes);
         return level.position.is_some();
     }
-    if load(guest, world) {
+    if load(guest, world, prototypes) {
         return true;
     }
     saved.is_some_and(|level| {
-        apply(guest, level);
+        apply(guest, level, prototypes);
         level.position.is_some()
     })
 }
@@ -227,8 +237,14 @@ pub fn face_world_spawn(guest: &mut Guest, known: bool, [yaw, pitch]: [f32; 2]) 
     guest.head_yaw = yaw;
 }
 
-/// Give a guest the player state read into `level`.
-pub fn apply(guest: &mut Guest, level: &Level) {
+/// Give a guest the player state read into `level`. Its stacks are taken in as
+/// `ItemStack.CODEC` builds them against `prototypes`, the item prototypes of the
+/// game the guest joins (`clean_stack`): `level`'s read had no item table.
+pub fn apply(guest: &mut Guest, level: &Level, prototypes: &crate::item_data::ItemPrototypes) {
+    let clean = |mut stack: ItemStack| {
+        crate::item_data::clean_stack(&mut stack, prototypes);
+        stack
+    };
     if let Some(p) = level.position {
         guest.place(p);
     }
@@ -313,7 +329,11 @@ pub fn apply(guest: &mut Guest, level: &Level) {
     guest.recipe_book = level.recipe_book.clone();
     guest.dimension = level.dimension.clone();
     if level.ender_items.len() == 27 {
-        guest.ender_items = level.ender_items.clone();
+        guest.ender_items = level
+            .ender_items
+            .iter()
+            .map(|slot| slot.clone().map(clean))
+            .collect();
     }
     for (slot, item, count, damage) in &level.inventory {
         let mut stack = ItemStack {
@@ -325,6 +345,7 @@ pub fn apply(guest: &mut Guest, level: &Level) {
         if stack.count == 0 {
             stack.count = 1;
         }
+        let stack = clean(stack);
         match *slot {
             0..=35 => guest.inventory[usize::from(*slot)] = Some(stack),
             100 => guest.armor[3] = Some(stack),
@@ -744,7 +765,7 @@ mod tests {
         let mut level = Level::default();
         level.read_player(&tag);
         level.player_extra = Some(tag);
-        apply(&mut back, &level);
+        apply(&mut back, &level, &Default::default());
         let saved = back.saved.as_ref().unwrap();
         let read =
             crate::sculk::WardenSpawnTracker::from_nbt(saved.get("warden_spawn_tracker").unwrap());
@@ -767,7 +788,7 @@ mod tests {
             rotation: [-135.0, 30.0],
             ..Level::default()
         };
-        apply(&mut g, &level);
+        apply(&mut g, &level, &Default::default());
         face_world_spawn(&mut g, true, [90.0, -15.0]);
         assert_eq!((g.yaw, g.pitch, g.head_yaw), (-135.0, 30.0, -135.0));
     }
@@ -794,7 +815,7 @@ mod tests {
         assert!(tag.get("Inventory").is_some());
         let mut loaded = guest();
         loaded.uuid = 7;
-        assert!(load(&mut loaded, &dir));
+        assert!(load(&mut loaded, &dir, &Default::default()));
         assert_eq!(loaded.equipment, g.equipment);
         assert_eq!(loaded.armor, g.armor);
         // A vanilla file with only a saddle keeps it and has no body.
@@ -807,7 +828,7 @@ mod tests {
             )]),
         )]));
         let mut vanilla = guest();
-        apply(&mut vanilla, &level);
+        apply(&mut vanilla, &level, &Default::default());
         assert_eq!(vanilla.equipment[horizon_items::equipment::BODY], None);
         assert_eq!(
             vanilla.equipment[horizon_items::equipment::SADDLE]
@@ -853,7 +874,7 @@ mod tests {
         for uuid in 1..=150 {
             let mut loaded = guest();
             loaded.uuid = uuid;
-            assert!(load(&mut loaded, &dir));
+            assert!(load(&mut loaded, &dir, &Default::default()));
             assert_eq!(first_item(&loaded), Some(("minecraft:diamond", 5)));
         }
         saves.enqueue(&holding(1, "minecraft:gold_ingot", 7), &dir);
@@ -862,7 +883,7 @@ mod tests {
         assert!(saves.writes_finished().unwrap());
         let mut loaded = guest();
         loaded.uuid = 1;
-        assert!(load(&mut loaded, &dir));
+        assert!(load(&mut loaded, &dir, &Default::default()));
         assert_eq!(first_item(&loaded), Some(("minecraft:emerald", 9)));
         // The barrier protects the synchronous, newer logout snapshot.
         for uuid in 1..=150 {
@@ -874,7 +895,7 @@ mod tests {
                 .1
         );
         drop(saves);
-        assert!(load(&mut loaded, &dir));
+        assert!(load(&mut loaded, &dir, &Default::default()));
         assert_eq!(first_item(&loaded), Some(("minecraft:iron_ingot", 11)));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -901,12 +922,12 @@ mod tests {
         for uuid in 1..=150 {
             let mut g = guest();
             g.uuid = uuid;
-            assert!(load(&mut g, &dir));
+            assert!(load(&mut g, &dir, &Default::default()));
             assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
         }
         let mut loaded = guest();
         loaded.uuid = 1;
-        assert!(load(&mut loaded, &dir));
+        assert!(load(&mut loaded, &dir, &Default::default()));
         assert_eq!(first_item(&loaded), Some(("minecraft:diamond", 5)));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -969,6 +990,124 @@ mod tests {
         g.inventory[0].as_ref().map(|s| (&*s.item, s.count))
     }
 
+    /// Player admission builds the saved stacks against the joining world's item
+    /// prototypes (`ItemStack.CODEC`, `applyPatch`), on the owner's login and on a
+    /// dedicated guest's: a value equal to the prototype leaves the patch, another
+    /// value and a removal of the prototype's own component stay and save again, and
+    /// a chest's stack taken in against the same table stacks with the player's. A
+    /// world whose prototype differs keeps the value as the override it is there.
+    #[test]
+    fn saved_stacks_join_against_the_world_prototypes() {
+        let snbt = |text: &str| horizon_core::nbt::parse_snbt(text).unwrap().0;
+        let table = |ore_limit: i32| -> crate::item_data::ItemPrototypes {
+            let compound = |json: serde_json::Value| {
+                horizon_core::json_nbt::json_to_compound(json.as_object().unwrap()).unwrap()
+            };
+            std::collections::HashMap::from([
+                (
+                    "minecraft:diamond_pickaxe".to_owned(),
+                    compound(serde_json::json!({
+                        "minecraft:damage": 0, "minecraft:max_damage": 1561,
+                        "minecraft:max_stack_size": 1, "minecraft:repair_cost": 0
+                    })),
+                ),
+                (
+                    "minecraft:iron_ore".to_owned(),
+                    compound(serde_json::json!({ "minecraft:max_stack_size": ore_limit })),
+                ),
+            ])
+        };
+        let (vanilla, other) = (table(64), table(16));
+        let ore = |slot: u8, components: &str| {
+            format!(r#"{{Slot:{slot}b,id:"minecraft:iron_ore",count:3,components:{components}}}"#)
+        };
+        let mut level = Level::default();
+        level.read_player(&snbt(&format!(
+            concat!(
+                r#"{{Inventory:[{{Slot:0b,id:"minecraft:diamond_pickaxe",count:1,components:"#,
+                r#"{{"minecraft:damage":0,"minecraft:max_damage":1561,"minecraft:repair_cost":0}}}},"#,
+                r#"{{Slot:1b,id:"minecraft:diamond_pickaxe",count:1,components:"#,
+                r#"{{"minecraft:max_damage":100,"!minecraft:damage":{{}},"!minecraft:custom_name":{{}}}}}},"#,
+                "{}],EnderItems:[{}]}}"
+            ),
+            ore(2, r#"{"minecraft:max_stack_size":64}"#),
+            ore(0, r#"{"minecraft:max_stack_size":64}"#),
+        )));
+        level.singleplayer_file = true;
+        let canon = |stack: Option<&ItemStack>| {
+            stack
+                .and_then(crate::item_data::encode_components)
+                .map(|c| crate::item_data::canon_tag(&c))
+        };
+        let custom = Some(crate::item_data::canon_tag(&snbt(
+            r#"{"minecraft:max_damage":100,"!minecraft:damage":{}}"#,
+        )));
+        let check = |g: &Guest| {
+            assert_eq!(
+                g.inventory[0].as_ref(),
+                Some(&ItemStack::new("minecraft:diamond_pickaxe", 1))
+            );
+            assert_eq!(canon(g.inventory[1].as_ref()), custom);
+            assert_eq!(
+                g.inventory[2].as_ref(),
+                Some(&ItemStack::new("minecraft:iron_ore", 3))
+            );
+            assert_eq!(canon(g.ender_items[0].as_ref()), None);
+        };
+        // The owner's login: the player level.dat holds.
+        let dir = world("prototypes");
+        let mut owner = guest();
+        let _ = load_owner(&mut owner, &dir, Some(&level), &vanilla);
+        check(&owner);
+        // A dedicated server's guest: its own player file, written as an older build
+        // saved it, every value in.
+        let mut written = guest();
+        apply(&mut written, &level, &Default::default());
+        assert_eq!(
+            canon(written.inventory[2].as_ref()),
+            Some(crate::item_data::canon_tag(&snbt(
+                r#"{"minecraft:max_stack_size":64}"#
+            )))
+        );
+        assert!(save(&written, &dir));
+        let mut joined = guest();
+        assert!(load(&mut joined, &dir, &vanilla));
+        check(&joined);
+        // Saved again and loaded again: the override and the removal stay.
+        let mut resaved = Level::default();
+        store(&joined, &mut resaved, None);
+        let mut again = guest();
+        apply(&mut again, &resaved, &vanilla);
+        check(&again);
+        // A chest saved with the same value stacks with the player's ore; a real
+        // override does not.
+        let chest = |components: &str| {
+            let tag = snbt(&format!(
+                r#"{{id:"minecraft:chest",x:0,y:0,z:0,Items:[{}]}}"#,
+                ore(0, components)
+            ));
+            let (_, mut entity) = crate::save::decode_block_entity(&tag).unwrap();
+            entity.clean_stacks(&vanilla);
+            let crate::containers::BlockEntity::Chest(items) = entity else {
+                panic!("a chest")
+            };
+            items[0].clone().unwrap()
+        };
+        let ore_stack = joined.inventory[2].as_ref().unwrap();
+        assert!(ore_stack.same_item_same_components(&chest(r#"{"minecraft:max_stack_size":64}"#)));
+        assert!(!ore_stack.same_item_same_components(&chest(r#"{"minecraft:max_stack_size":16}"#)));
+        // Another world, whose ore stacks to 16: 64 is an override there.
+        let mut elsewhere = guest();
+        apply(&mut elsewhere, &level, &other);
+        assert_eq!(
+            canon(elsewhere.inventory[2].as_ref()),
+            Some(crate::item_data::canon_tag(&snbt(
+                r#"{"minecraft:max_stack_size":64}"#
+            )))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_owner_loads_the_file_level_dat_names_over_an_older_own_file() {
         // #5351: a newer build saved the owner to both files, then 0.2.93 saved
@@ -988,7 +1127,7 @@ mod tests {
         let saved = Level::read(&dir).unwrap();
         let mut g = guest();
         g.uuid = owner;
-        assert!(load_owner(&mut g, &dir, Some(&saved)));
+        assert!(load_owner(&mut g, &dir, Some(&saved), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:gold_ingot", 7)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1003,7 +1142,7 @@ mod tests {
         let saved = Level::read(&dir).unwrap();
         let mut g = guest();
         g.uuid = owner;
-        assert!(load_owner(&mut g, &dir, Some(&saved)));
+        assert!(load_owner(&mut g, &dir, Some(&saved), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1040,7 +1179,7 @@ mod tests {
             horizon_mod_runtime::attachments::index::AttachmentIndex::default(),
         ));
         let binding = loaded.attachments.bind_index(&index, loaded.uuid);
-        assert!(load(&mut loaded, &dir));
+        assert!(load(&mut loaded, &dir, &Default::default()));
         let copy = loaded.attachments.copy_on_death().unwrap();
         loaded.attachments.replace_contents(copy);
         assert_eq!(
@@ -1081,11 +1220,14 @@ mod tests {
         assert!(saved.singleplayer_file, "the named file's .dat_old counts");
         let mut g = guest();
         g.uuid = owner;
-        assert!(load_owner(&mut g, &dir, Some(&saved)));
+        assert!(load_owner(&mut g, &dir, Some(&saved), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
         let mut g = guest();
         g.uuid = owner;
-        assert!(load(&mut g, &dir), "a guest's own file falls back too");
+        assert!(
+            load(&mut g, &dir, &Default::default()),
+            "a guest's own file falls back too"
+        );
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1105,11 +1247,11 @@ mod tests {
         let saved = Level::read(&dir).unwrap();
         let mut g = guest();
         g.uuid = owner;
-        assert!(load_owner(&mut g, &dir, Some(&saved)));
+        assert!(load_owner(&mut g, &dir, Some(&saved), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:gold_ingot", 7)));
         let mut g = guest();
         g.uuid = owner;
-        assert!(load(&mut g, &dir));
+        assert!(load(&mut g, &dir, &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:gold_ingot", 7)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1152,7 +1294,7 @@ mod tests {
         assert!(saved.singleplayer_file);
         let mut g = guest();
         g.uuid = new;
-        assert!(load_owner(&mut g, &dir, Some(&saved)));
+        assert!(load_owner(&mut g, &dir, Some(&saved), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1180,7 +1322,7 @@ mod tests {
         assert!(!path(&dir, old).exists());
         let mut g = guest();
         g.uuid = new;
-        assert!(load_owner(&mut g, &dir, Some(&read)));
+        assert!(load_owner(&mut g, &dir, Some(&read), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:emerald", 9)));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1259,7 +1401,7 @@ mod tests {
         read.read_player(&tag);
         read.player_extra = Some(tag);
         let mut back = guest();
-        apply(&mut back, &read);
+        apply(&mut back, &read, &Default::default());
         assert_eq!(back.loaded_body, g.loaded_body);
     }
 
@@ -1304,7 +1446,7 @@ mod tests {
         read.read_player(&tag);
         read.player_extra = Some(tag.clone());
         let mut back = guest();
-        apply(&mut back, &read);
+        apply(&mut back, &read, &Default::default());
         (tag, back)
     }
 
@@ -1372,7 +1514,7 @@ mod tests {
                 ..Level::default()
             };
             let mut g = guest();
-            apply(&mut g, &level);
+            apply(&mut g, &level, &Default::default());
             assert_eq!(g.loaded_body.expect("a body").fire_ticks, expected);
         }
     }
@@ -1467,7 +1609,7 @@ mod tests {
         read.read_player(&tag);
         read.player_extra = Some(tag);
         let mut back = guest();
-        apply(&mut back, &read);
+        apply(&mut back, &read, &Default::default());
         assert_eq!(back.post_effects, g.post_effects);
         // The cleared list is written over the loaded file.
         g.post_effects.clear();
@@ -1601,7 +1743,7 @@ mod tests {
         read.read_player(&tag);
         read.player_extra = Some(tag);
         let mut back = guest();
-        apply(&mut back, &read);
+        apply(&mut back, &read, &Default::default());
         assert_eq!(back.loaded_body.expect("a body").air, 99);
     }
 
@@ -1628,7 +1770,7 @@ mod tests {
         read.read_player(&tag);
         read.player_extra = Some(tag);
         let mut back = guest();
-        apply(&mut back, &read);
+        apply(&mut back, &read, &Default::default());
         assert_eq!(back.saved_vehicle, Some(vehicle));
         // Saved again before the horse is back, the file keeps it whole.
         let mut again = Level::default();
@@ -1673,7 +1815,7 @@ mod tests {
         assert_eq!(saved("mayBuild"), Some(Tag::Byte(0)));
         assert_eq!(saved("instabuild"), Some(Tag::Byte(1)));
         let mut back = guest();
-        assert!(load(&mut back, &dir));
+        assert!(load(&mut back, &dir, &Default::default()));
         assert_eq!(
             (back.abilities.flying_speed, back.abilities.walking_speed),
             (2.5, 0.3)
@@ -1687,13 +1829,13 @@ mod tests {
             Tag::compound([("flySpeed", Tag::Float(0.1f32.to_bits()))]),
         )]));
         let mut other = guest();
-        apply(&mut other, &level);
+        apply(&mut other, &level, &Default::default());
         assert_eq!(other.abilities.flying_speed, 0.1);
         level.read_player(&Tag::compound([(
             "abilities",
             Tag::Compound(Default::default()),
         )]));
-        apply(&mut other, &level);
+        apply(&mut other, &level, &Default::default());
         assert_eq!(other.abilities.flying_speed, 0.05);
         assert_eq!(other.abilities.walking_speed, 0.1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1718,7 +1860,7 @@ mod tests {
         let read = Level::read(&dir).unwrap();
         let mut g = holding(owner, "minecraft:dirt", 1);
         g.inventory[0] = None;
-        let known = load_owner(&mut g, &dir, Some(&read));
+        let known = load_owner(&mut g, &dir, Some(&read), &Default::default());
         assert!(!known, "the owner has not been here before");
         assert_eq!(first_item(&g), None, "no inventory of the friend's");
         // The owner's save names the owner, and leaves the friend's file alone.
@@ -1749,7 +1891,7 @@ mod tests {
         assert_eq!(read.player_uuid, None);
         let mut g = guest();
         g.uuid = account;
-        assert!(load_owner(&mut g, &dir, Some(&read)));
+        assert!(load_owner(&mut g, &dir, Some(&read), &Default::default()));
         assert_eq!(first_item(&g), Some(("minecraft:diamond", 5)));
         let _ = std::fs::remove_dir_all(&dir);
     }

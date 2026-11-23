@@ -227,3 +227,77 @@ fn saved_player_stacks_load_against_the_world_prototypes() {
         )
     );
 }
+
+/// Stacks a command's NBT (`/setblock`, `/data merge block`) or a loaded item entity
+/// or item frame brings in are built against the world's item prototypes: a value
+/// equal to the prototype leaves the patch, an override stays.
+#[test]
+#[ignore = "daily"]
+fn command_and_entity_stacks_are_built_against_the_world_prototypes() {
+    let mut resources = None;
+    let mut game = server_game(&mut resources);
+    game.build_registries();
+    game.set_allow_commands(true);
+    game.block_ticks
+        .add_empty_chunk(BlockPos::new(0, 0, 0).chunk())
+        .unwrap();
+    assert!(game.run_command("forceload add 0 0 15 15"));
+    assert!(game.run_command("setblock 4 199 4 stone"));
+    let snbt = |text: &str| horizon_core::nbt::parse_snbt(text).unwrap().0;
+    let ore =
+        |components: &str| format!(r#"id:"minecraft:iron_ore",count:3,components:{components}"#);
+    let (redundant, custom) = (
+        r#"{"minecraft:max_stack_size":64}"#,
+        r#"{"minecraft:max_stack_size":16}"#,
+    );
+    let plain = ItemStack::new("minecraft:iron_ore", 3);
+    let canon = |stack: Option<&ItemStack>| {
+        stack
+            .and_then(horizon_client::item_data::encode_components)
+            .map(|c| horizon_client::item_data::canon_tag(&c))
+    };
+    let chest = |game: &crate::game::Game<'_>| {
+        let horizon_client::containers::BlockEntity::Chest(slots) =
+            game.world.block_entities.get(&(4, 200, 4)).unwrap()
+        else {
+            panic!("actual chest model missing")
+        };
+        slots.clone()
+    };
+    assert!(game.run_command(&format!(
+        "setblock 4 200 4 chest{{Items:[{{Slot:0b,{}}},{{Slot:1b,{}}}]}}",
+        ore(redundant),
+        ore(custom)
+    )));
+    let slots = chest(&game);
+    assert_eq!(slots[0].as_ref(), Some(&plain));
+    assert_eq!(
+        canon(slots[1].as_ref()),
+        Some(horizon_client::item_data::canon_tag(&snbt(custom)))
+    );
+    assert!(game.run_command(&format!(
+        "data merge block 4 200 4 {{Items:[{{Slot:2b,{}}}]}}",
+        ore(redundant)
+    )));
+    assert_eq!(chest(&game)[2].as_ref(), Some(&plain));
+    // A saved item entity and item frame.
+    game.load_item(
+        snbt(&format!(
+            r#"{{id:"minecraft:item",Pos:[4.5d,201d,4.5d],Item:{{{}}}}}"#,
+            ore(redundant)
+        )),
+        None,
+    );
+    assert_eq!(game.dropped.last().map(|e| &e.stack), Some(&plain));
+    game.load_item_frame(
+        snbt(&format!(
+            r#"{{id:"minecraft:item_frame",block_pos:[I;4,201,5],Facing:2b,Item:{{{}}}}}"#,
+            ore(redundant)
+        )),
+        None,
+    );
+    assert_eq!(
+        canon(game.item_frames.last().and_then(|f| f.item.as_ref())),
+        None
+    );
+}
