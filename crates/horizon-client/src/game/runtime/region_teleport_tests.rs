@@ -1244,12 +1244,7 @@ fn players_join_leave_die_respawn_chat_and_change_the_tab_list_across_regions_wi
             .all(|g| g.name != "Charlie")
     );
     assert!(
-        std::env::var_os("HORIZON_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap()
-            .join("region-connections/saves/regions/playerdata")
-            .join(format!("{}.dat", horizon_protocol::crypto::uuid_string(charlie_uuid)))
-            .exists(),
+        horizon_client::lan::playerdata::path(&game.world_root, charlie_uuid).exists(),
         "the leave saved Charlie"
     );
 
