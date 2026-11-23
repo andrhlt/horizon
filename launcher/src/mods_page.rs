@@ -1313,14 +1313,17 @@ impl Launcher {
                     }
                     if let Some(target) = java.as_ref().filter(|t| t.takes(p.kind)) {
                         let done = java_instance::install(&*source, target, &p, &home, &progress)?;
-                        let names: Vec<String> = done
-                            .iter()
-                            .map(|e| format!("{} {}", e.title, e.number))
-                            .collect();
-                        return Ok(trf(
-                            "Installed {mods}, checksums checked.",
-                            &[("mods", &names.join(", "))],
-                        ));
+                        let (main, deps) = split_installed_names(&done, &p.id);
+                        return Ok(match deps {
+                            Some(deps) => trf(
+                                "Installed {main} and dependencies ({deps}), checksums checked.",
+                                &[("main", &main), ("deps", &deps)],
+                            ),
+                            None => trf(
+                                "Installed {mods}, checksums checked.",
+                                &[("mods", &main)],
+                            ),
+                        });
                     }
                     if p.kind == PackKind::DataPack {
                         let (world, name) = world.ok_or_else(|| {
@@ -1400,31 +1403,50 @@ impl Launcher {
                         }
                         None => installed::install(&*source, &p, everything, &home, &progress),
                     }?;
-                    let names: Vec<String> = done
+                    let (main, deps) = split_installed_names(&done, &p.id);
+                    let mods = done
                         .iter()
                         .map(|e| format!("{} {}", e.title, e.number))
-                        .collect();
-                    let mods = names.join(", ");
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     if done.iter().any(|e| native_status::is_native_file(&e.file)) {
-                        return Ok(trf(
-                            "Installed {mods} into {instance}. Build to play with it.",
-                            &[("mods", &mods), ("instance", &instance)],
-                        ));
+                        return Ok(match deps {
+                            Some(deps) => trf(
+                                "Installed {main} and dependencies ({deps}) into {instance}. Build to play with it.",
+                                &[("main", &main), ("deps", &deps), ("instance", &instance)],
+                            ),
+                            None => trf(
+                                "Installed {mods} into {instance}. Build to play with it.",
+                                &[("mods", &mods), ("instance", &instance)],
+                            ),
+                        });
                     }
                     if p.source == SourceId::Horizon && p.kind == PackKind::Mod {
-                        return Ok(trf(
-                            "Installed {mods} into horizon-mods and turned it on, checksum \
-                             checked (Options > Mods in the game).",
-                            &[("mods", &mods)],
-                        ));
+                        return Ok(match deps {
+                            Some(deps) => trf(
+                                "Installed {main} and dependencies ({deps}) into horizon-mods and turned them on, checksum checked (Options > Mods in the game).",
+                                &[("main", &main), ("deps", &deps)],
+                            ),
+                            None => trf(
+                                "Installed {mods} into horizon-mods and turned it on, checksum \
+                                 checked (Options > Mods in the game).",
+                                &[("mods", &mods)],
+                            ),
+                        });
                     }
                     if p.kind == PackKind::Mod {
                         let skipped = done.last().map_or(0, |e| e.skipped.len());
-                        let ported = trf(
-                            "Ported {mods} into horizon-mods and turned on (Options > Mods in \
-                             the game).",
-                            &[("mods", &mods)],
-                        );
+                        let ported = match deps {
+                            Some(deps) => trf(
+                                "Ported {main} and dependencies ({deps}) into horizon-mods and turned on (Options > Mods in the game).",
+                                &[("main", &main), ("deps", &deps)],
+                            ),
+                            None => trf(
+                                "Ported {mods} into horizon-mods and turned on (Options > Mods in \
+                                 the game).",
+                                &[("mods", &mods)],
+                            ),
+                        };
                         return Ok(if skipped > 0 {
                             format!(
                                 "{ported} {}",
@@ -1980,12 +2002,21 @@ impl Launcher {
             .filter(|e| e.kind == kind)
             .map(|e| self.project_icon(e))
             .collect();
-        let entries: Vec<&installed::Entry> = self
+        let all_dep_statuses = installed::entries_dependency_status(
+            &self.mods.home(),
+            &self.mods.installed,
+            self.mods.java.is_some(),
+        );
+        let entries_with_deps: Vec<(&installed::Entry, installed::DependencyStatus)> = self
             .mods
             .installed
             .iter()
-            .filter(|e| e.kind == kind)
+            .zip(all_dep_statuses)
+            .filter(|(e, _)| e.kind == kind)
             .collect();
+        let entries: Vec<&installed::Entry> = entries_with_deps.iter().map(|(e, _)| *e).collect();
+        let dep_statuses: Vec<installed::DependencyStatus> =
+            entries_with_deps.into_iter().map(|(_, s)| s).collect();
         let native_entries = if kind == PackKind::Mod && self.mods.java.is_none() {
             self.native_files()
         } else {
@@ -2008,6 +2039,7 @@ impl Launcher {
                 return self.native_mod_row(&native_entries[i - entries.len()], busy, cx);
             }
             let e = entries[i];
+            let dep_status = &dep_statuses[i];
             let key = (e.source, e.project.clone());
             let is_native = self.mods.java.is_none() && native_status::is_native_file(&e.file);
             let mut right = div().flex().items_center().gap(px(8.));
@@ -2144,6 +2176,9 @@ impl Launcher {
                     }),
                 );
             }
+            if !dep_status.missing_deps.is_empty() {
+                right = right.child(blocks::badge(tr("Missing dependency"), t.warn, &t));
+            }
             right = right.child(remove);
             let detail = div()
                 .flex()
@@ -2153,9 +2188,15 @@ impl Launcher {
                         .source
                         .shown_for(&e.project)
                         .map(|s| trf("from {source}", &[("source", s)]));
-                    let needed = e
-                        .dependency
-                        .then(|| tr("needed by another pack").to_string());
+                    let needed = if !dep_status.required_by.is_empty() {
+                        Some(trf(
+                            "Needed by {mods}",
+                            &[("mods", &dep_status.required_by.join(", "))],
+                        ))
+                    } else {
+                        e.dependency
+                            .then(|| tr("needed by another pack").to_string())
+                    };
                     let origin: Vec<String> = from.into_iter().chain(needed).collect();
                     e.verdict
                         .iter()
@@ -2166,6 +2207,18 @@ impl Launcher {
                         .collect::<Vec<_>>()
                         .join(" · ")
                 })
+                .children((!dep_status.missing_deps.is_empty()).then(|| {
+                    div().text_color(t.warn).child(trf(
+                        "Missing required dependencies: {deps}",
+                        &[("deps", &dep_status.missing_deps.join(", "))],
+                    ))
+                }))
+                .children((confirming && !dep_status.required_by.is_empty()).then(|| {
+                    div().text_color(t.danger).child(trf(
+                        "Required by {mods}. Click Remove for good to remove anyway.",
+                        &[("mods", &dep_status.required_by.join(", "))],
+                    ))
+                }))
                 .children(instance.as_ref().filter(|_| is_native).map(|name| {
                     div()
                         .text_color(t.ink)
@@ -2425,6 +2478,31 @@ impl Launcher {
         }
         out
     }
+}
+
+/// Splits installed entries into the requested project (`main_id`) and any auto-installed
+/// dependencies so the install notice can name both clearly.
+fn split_installed_names(done: &[installed::Entry], main_id: &str) -> (String, Option<String>) {
+    let mut main = Vec::new();
+    let mut deps = Vec::new();
+    for e in done {
+        let label = format!("{} {}", e.title, e.number);
+        if e.project == main_id {
+            main.push(label);
+        } else {
+            deps.push(label);
+        }
+    }
+    if main.is_empty() {
+        let all = done
+            .iter()
+            .map(|e| format!("{} {}", e.title, e.number))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return (all, None);
+    }
+    let deps = (!deps.is_empty()).then(|| deps.join(", "));
+    (main.join(", "), deps)
 }
 
 fn pack_install_notice(kind: PackKind, source: SourceId, mods: &str) -> String {

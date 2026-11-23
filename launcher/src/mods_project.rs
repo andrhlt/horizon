@@ -15,7 +15,7 @@ use crate::glass_ui::{self as ui, white};
 use gpui::img;
 use horizon_launcher::browser::{
     self,
-    details::{self, Details, Environment, Filters, Image, Sort, Tags},
+    details::{self, Dependency, DependencyKind, Details, Environment, Filters, Image, Sort, Tags},
     images, java, Kind as PackKind, Project, SourceId, Support, Version,
 };
 use horizon_theme::glass::{fill, ink, radius};
@@ -139,9 +139,18 @@ pub(super) struct Browse {
     /// Images on disk, by URL and size; `None` while they load or when they failed.
     images: HashMap<(String, u32), Option<PathBuf>>,
     image_queue: Option<std::sync::mpsc::Sender<(String, u32)>>,
+    /// Cached project details (for sidebar dependency preview & reopening).
+    details_cache: HashMap<(SourceId, String), Result<Arc<Details>, String>>,
+    details_asked: HashSet<(SourceId, String)>,
 }
 
 impl Browse {
+    pub(super) fn cached_details(&self, source: SourceId, id: &str) -> Option<&Arc<Details>> {
+        self.details_cache
+            .get(&(source, id.to_owned()))
+            .and_then(|r| r.as_ref().ok())
+    }
+
     fn load_versions(&mut self, request: u64, versions: Result<Vec<ProjectVersion>, String>) {
         if let Some(open) = self.open.as_mut().filter(|o| o.request == request) {
             open.versions = Some(versions.map(Arc::from));
@@ -224,6 +233,7 @@ impl Launcher {
         }
         match loaded {
             Loaded::Details(key, d) => {
+                b.details_cache.insert(key.clone(), d.clone());
                 if let Some(o) = open(b, &key) {
                     o.details = Some(d);
                 }
@@ -251,6 +261,32 @@ impl Launcher {
             }
             Loaded::Tags(_, Err(_)) => {}
         }
+    }
+
+    /// Fetches project details once in the background (for sidebar dependency previews).
+    pub(super) fn mods_ensure_details(&mut self, project: &Project) {
+        let key = (project.source, project.id.clone());
+        if self.mods.browse.details_cache.contains_key(&key)
+            || !self.mods.browse.details_asked.insert(key.clone())
+        {
+            return;
+        }
+        let tx = self.mods.tx.clone();
+        let p = project.clone();
+        std::thread::spawn(move || {
+            let Some(source) = browser::source(p.source) else {
+                return;
+            };
+            let d = source.details(&p).map(Arc::new);
+            let _ = tx.send(Event::Loaded(Loaded::Details(key, d)));
+        });
+    }
+
+    /// Whether a dependency id is already installed in the current instance.
+    pub(super) fn dependency_is_installed(&self, dep_id: &str) -> bool {
+        self.mods.installed.iter().any(|e| {
+            e.project == dep_id || e.slug == dep_id || browser::horizon::mod_id(e) == Some(dep_id)
+        })
     }
 
     /// Opens a project's page and asks its source for the rest of it.
@@ -1045,6 +1081,9 @@ impl Launcher {
             page = page.child(what);
         }
         if let Some(Ok(d)) = &details {
+            if !d.dependencies.is_empty() {
+                page = page.child(self.mods_dependencies_section(&d.dependencies, installed));
+            }
             let mut links = div().flex().flex_wrap().gap(px(8.));
             let page_url = p.page.clone();
             if !page_url.is_empty() {
@@ -1138,6 +1177,63 @@ impl Launcher {
             },
         };
         Some(page.child(body))
+    }
+
+    /// Dependencies section for the full project page, grouped by Required / Optional / Incompatible.
+    fn mods_dependencies_section(&self, deps: &[Dependency], project_installed: bool) -> Div {
+        let t = self.theme;
+        let groups = [
+            (DependencyKind::Required, t.accent),
+            (DependencyKind::Optional, t.muted),
+            (DependencyKind::Incompatible, t.danger),
+        ];
+        let has_uninstalled_required = !project_installed
+            && deps.iter().any(|d| {
+                d.kind == DependencyKind::Required && !self.dependency_is_installed(&d.id)
+            });
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(caps(tr("Dependencies")).text_color(t.muted));
+        if has_uninstalled_required {
+            section = section.child(
+                text(theme::CAPTION)
+                    .text_color(t.ink_soft)
+                    .child(tr("Required dependencies are installed automatically.")),
+            );
+        }
+        let mut list = div().flex().flex_wrap().gap(px(8.));
+        for (kind, color) in groups {
+            for dep in deps.iter().filter(|d| d.kind == kind) {
+                let is_installed = self.dependency_is_installed(&dep.id);
+                let label = dep.name.as_deref().unwrap_or(&dep.id).to_owned();
+                let mut chip = plate(&t)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .child(text(theme::LABEL).text_color(t.ink).child(label))
+                    .children(dep.version_req.as_ref().map(|ver| {
+                        text(theme::CAPTION)
+                            .font_family(theme::MONO)
+                            .text_color(t.muted)
+                            .child(ver.clone())
+                    }))
+                    .child(blocks::badge(kind.label(), color, &t));
+                if is_installed {
+                    let (status_label, status_color) = if kind == DependencyKind::Incompatible {
+                        (tr("Installed (conflict)"), t.danger)
+                    } else {
+                        (tr("Installed"), t.success)
+                    };
+                    chip = chip.child(blocks::badge(status_label, status_color, &t));
+                }
+                list = list.child(chip);
+            }
+        }
+        section.child(list)
     }
 }
 

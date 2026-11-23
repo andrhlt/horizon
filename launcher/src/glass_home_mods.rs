@@ -223,17 +223,31 @@ impl Launcher {
             tr("File missing").to_string()
         } else if let Some(error) = &row.error {
             error.clone()
-        } else if let Some(origin) = row.native.as_ref().and_then(|n| n.origin.as_ref()) {
-            trf("from GitHub: {source}", &[("source", &origin.label())])
         } else {
-            match &row.entry {
-                Some(e) if e.dependency => trf(
-                    "{source} · needed by another mod",
-                    &[("source", e.source.label())],
-                ),
-                Some(e) => e.source.label().to_string(),
-                None => tr("Local file").to_string(),
+            let base = if let Some(origin) = row.native.as_ref().and_then(|n| n.origin.as_ref()) {
+                trf("from GitHub: {source}", &[("source", &origin.label())])
+            } else {
+                match &row.entry {
+                    Some(e) => e.source.label().to_string(),
+                    None => tr("Local file").to_string(),
+                }
+            };
+            let mut parts = vec![base];
+            if !row.required_by.is_empty() {
+                parts.push(trf(
+                    "Needed by {mods}",
+                    &[("mods", &row.required_by.join(", "))],
+                ));
+            } else if row.entry.as_ref().is_some_and(|e| e.dependency) {
+                parts.push(tr("needed by another mod").to_string());
             }
+            if !row.missing_deps.is_empty() {
+                parts.push(trf(
+                    "Missing: {deps}",
+                    &[("deps", &row.missing_deps.join(", "))],
+                ));
+            }
+            parts.join(" · ")
         };
         let note = match row.version.is_empty() {
             true => source,
@@ -346,6 +360,7 @@ impl Launcher {
             _ if row.missing => (tr("File missing"), ui::warn()),
             _ if !row.on => (tr("Off"), white(ink::QUIET)),
             _ if row.error.is_some() => (tr("Failed"), ui::danger()),
+            _ if !row.missing_deps.is_empty() => (tr("Missing dependency"), ui::warn()),
             None => (tr("Ready"), ui::live()),
             // The last build left it out: the card above says why, with Switch off.
             Some(_) if left.is_some() => (tr("Left out"), ui::warn()),
@@ -385,6 +400,13 @@ impl Launcher {
         // Nothing here grants the permission: say where it is asked for.
         let shown = match left {
             Some(left) => self.with_reason(shown, &left.label()),
+            None if word == tr("Missing dependency") => self.with_reason(
+                shown,
+                &trf(
+                    "Missing required dependencies: {deps}",
+                    &[("deps", &row.missing_deps.join(", "))],
+                ),
+            ),
             None if word == tr("Needs permission") => self.with_reason(
                 shown,
                 tr("Native mods need your permission before they build. Build asks you first."),
@@ -571,26 +593,36 @@ impl Launcher {
         } else {
             tr("Remove")
         };
+        let remove_note = if !row.required_by.is_empty() {
+            if confirming {
+                trf(
+                    "Required by {mods}. Click again to remove.",
+                    &[("mods", &row.required_by.join(", "))],
+                )
+            } else {
+                trf("Needed by {mods}", &[("mods", &row.required_by.join(", "))])
+            }
+        } else {
+            tr("Takes it out of this instance").to_string()
+        };
         let doomed = row.clone();
         menu = menu.child(
-            item(
-                "remove",
-                label.into(),
-                tr("Takes it out of this instance").to_string(),
-                busy,
-            )
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if confirming && doomed.missing {
-                    this.forget_missing_mods(Some(&doomed.file));
-                    this.mods.route_open = None;
-                } else if confirming {
-                    this.remove_mod_row(&doomed);
-                    this.mods.route_open = None;
-                } else {
-                    this.mods.route_open = Some(again.clone());
-                }
-                cx.notify();
-            })),
+            item("remove", label.into(), remove_note, busy)
+                .when(confirming && !row.required_by.is_empty(), |d| {
+                    d.text_color(ui::danger())
+                })
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    if confirming && doomed.missing {
+                        this.forget_missing_mods(Some(&doomed.file));
+                        this.mods.route_open = None;
+                    } else if confirming {
+                        this.remove_mod_row(&doomed);
+                        this.mods.route_open = None;
+                    } else {
+                        this.mods.route_open = Some(again.clone());
+                    }
+                    cx.notify();
+                })),
         );
         wrap = wrap.child(
             gpui::deferred(

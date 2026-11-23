@@ -94,6 +94,7 @@ impl Fake {
                 files: vec![file],
                 required: strings(needs),
                 optional: Vec::new(),
+                dependencies: Vec::new(),
                 blocked: None,
             },
         );

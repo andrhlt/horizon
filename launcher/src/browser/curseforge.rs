@@ -3,7 +3,11 @@
 //! `HORIZON_CURSEFORGE_API_KEY` in the environment, else the same variable when the launcher was
 //! built (the release workflow passes the repository secret). Files carry SHA-1 and MD5; the
 //! download is checked against the SHA-1.
-use super::{modrinth::encode, FileRef, Kind, Project, Query, Source, SourceId, Version, GAME};
+use super::{
+    details::{self, Dependency, DependencyKind},
+    modrinth::encode,
+    FileRef, Kind, Project, Query, Source, SourceId, Version, GAME,
+};
 use serde_json::Value;
 
 const API: &str = "https://api.curseforge.com/v1";
@@ -11,8 +15,12 @@ const API: &str = "https://api.curseforge.com/v1";
 const MINECRAFT: u64 = 432;
 /// `HashAlgo` in CurseForge's schema.
 const SHA1: u64 = 1;
+/// `FileRelationType::OptionalDependency`.
+const OPTIONAL: u64 = 2;
 /// `FileRelationType::RequiredDependency`.
 const REQUIRED: u64 = 3;
+/// `FileRelationType::Incompatible`.
+const INCOMPATIBLE: u64 = 5;
 
 pub struct CurseForge {
     key: String,
@@ -153,6 +161,34 @@ pub(super) fn parse_mod(m: &Value) -> Option<Project> {
     })
 }
 
+pub(super) fn parse_dependencies(list: &Value) -> Vec<Dependency> {
+    let mut out = Vec::new();
+    for d in list.as_array().into_iter().flatten() {
+        let kind = match d["relationType"].as_u64() {
+            Some(REQUIRED) => DependencyKind::Required,
+            Some(OPTIONAL) => DependencyKind::Optional,
+            Some(INCOMPATIBLE) => DependencyKind::Incompatible,
+            _ => continue,
+        };
+        let Some(mod_id) = d["modId"].as_u64() else {
+            continue;
+        };
+        let id = mod_id.to_string();
+        if !out
+            .iter()
+            .any(|existing: &Dependency| existing.id == id && existing.kind == kind)
+        {
+            out.push(Dependency {
+                id,
+                name: None,
+                kind,
+                version_req: None,
+            });
+        }
+    }
+    out
+}
+
 pub(super) fn parse_file(f: &Value) -> Option<Version> {
     let (game_versions, loaders) = split_versions(&f["gameVersions"]);
     let name = f["fileName"].as_str()?.to_owned();
@@ -177,6 +213,12 @@ pub(super) fn parse_file(f: &Value) -> Option<Version> {
             }]
         })
         .unwrap_or_default();
+    let dependencies = parse_dependencies(&f["dependencies"]);
+    let required = dependencies
+        .iter()
+        .filter(|d| d.kind == DependencyKind::Required)
+        .map(|d| d.id.clone())
+        .collect();
     Some(Version {
         id: f["id"].as_u64()?.to_string(),
         number: f["displayName"].as_str().unwrap_or(&name).to_owned(),
@@ -185,13 +227,8 @@ pub(super) fn parse_file(f: &Value) -> Option<Version> {
         loaders,
         files,
         optional: Vec::new(),
-        required: f["dependencies"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|d| d["relationType"].as_u64() == Some(REQUIRED))
-            .filter_map(|d| d["modId"].as_u64().map(|id| id.to_string()))
-            .collect(),
+        required,
+        dependencies,
         blocked: url
             .is_none()
             .then(|| "Its author allows downloads from CurseForge's own site only.".to_owned()),
@@ -236,5 +273,60 @@ impl Source for CurseForge {
             .collect();
         all.sort_by(|a, b| b.published.cmp(&a.published));
         Ok(all)
+    }
+
+    fn details(&self, project: &Project) -> Result<details::Details, String> {
+        let mut out = details::Details {
+            body: project.summary.clone(),
+            ..details::Details::default()
+        };
+        if let Ok(versions) = self.versions(project) {
+            let picked = super::pick(project.kind, &versions, true).or_else(|| versions.first());
+            if let Some(version) = picked {
+                out.dependencies = version.dependencies.clone();
+            }
+        }
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_required_optional_and_incompatible_relation_types() {
+        let deps = parse_dependencies(&json!([
+            {"modId": 100, "relationType": 3},
+            {"modId": 200, "relationType": 2},
+            {"modId": 300, "relationType": 5},
+            {"modId": 400, "relationType": 1},
+            {"modId": 500, "relationType": 4},
+            {"modId": 100, "relationType": 3}
+        ]));
+        assert_eq!(
+            deps,
+            vec![
+                Dependency {
+                    id: "100".into(),
+                    name: None,
+                    kind: DependencyKind::Required,
+                    version_req: None,
+                },
+                Dependency {
+                    id: "200".into(),
+                    name: None,
+                    kind: DependencyKind::Optional,
+                    version_req: None,
+                },
+                Dependency {
+                    id: "300".into(),
+                    name: None,
+                    kind: DependencyKind::Incompatible,
+                    version_req: None,
+                },
+            ]
+        );
     }
 }

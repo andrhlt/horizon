@@ -43,6 +43,10 @@ pub(super) struct ModRow {
     pub(super) internals: Vec<String>,
     /// What the package is and its mod id, for a Horizon mod; None for a Java jar.
     pub(super) kind: Option<(ModKind, String)>,
+    /// Titles of other installed mods in this instance that require this mod.
+    pub(super) required_by: Vec<String>,
+    /// Required dependencies of this mod that are missing or disabled.
+    pub(super) missing_deps: Vec<String>,
 }
 
 impl ModRow {
@@ -190,6 +194,8 @@ fn read_reporting(home: &Path, java_instance: bool, mut found: impl FnMut(&str))
                         native: None,
                         internals: Vec::new(),
                         kind: None,
+                        required_by: Vec::new(),
+                        missing_deps: Vec::new(),
                     }
                 })
             })
@@ -228,6 +234,8 @@ fn read_reporting(home: &Path, java_instance: bool, mut found: impl FnMut(&str))
                         .as_ref()
                         .ok()
                         .map(|p| (ModKind::of(&p.manifest), p.manifest.id.clone())),
+                    required_by: Vec::new(),
+                    missing_deps: Vec::new(),
                 }
             })
             .inspect(|row| found(&row.name))
@@ -257,11 +265,77 @@ fn read_reporting(home: &Path, java_instance: bool, mut found: impl FnMut(&str))
                 kind: kind.map(|kind| (kind, native.id.clone())),
                 internals: native.internals.clone(),
                 native: Some(native),
+                required_by: Vec::new(),
+                missing_deps: Vec::new(),
             }
         }));
     }
+    populate_row_dependencies(home, &mut rows);
     rows.sort_by_key(|r| r.name.to_lowercase());
     rows
+}
+
+/// Computes `required_by` and `missing_deps` for each `ModRow` from tracked entry metadata,
+/// local `.hmod` `horizon-mod.toml` `[dependencies]`, and Horizon's in-memory registry index.
+fn populate_row_dependencies(home: &Path, rows: &mut [ModRow]) {
+    let index = horizon::known_index();
+    let mods: Vec<installed::InstalledModDeps> = rows
+        .iter()
+        .map(|row| {
+            let mut ids = Vec::new();
+            if let Some(e) = &row.entry {
+                ids.push(e.project.clone());
+                if !e.slug.is_empty() && !ids.contains(&e.slug) {
+                    ids.push(e.slug.clone());
+                }
+                if let Some(mid) = horizon::mod_id(e) {
+                    if !ids.iter().any(|id| id == mid) {
+                        ids.push(mid.to_owned());
+                    }
+                }
+            }
+            if let Some((_, id)) = &row.kind {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+            if let Some(n) = &row.native {
+                if !ids.contains(&n.id) {
+                    ids.push(n.id.clone());
+                }
+            }
+            let mut requires = match &row.entry {
+                Some(e) => installed::entry_required_deps(home, e),
+                None => Vec::new(),
+            };
+            if row.entry.is_none() {
+                if let Ok(pkg) =
+                    horizon_platform::mod_package::manifest::Package::read(&home.join(&row.file))
+                {
+                    for (id, dep) in &pkg.manifest.dependencies {
+                        if !dep.details().optional && !requires.contains(id) {
+                            requires.push(id.clone());
+                        }
+                    }
+                }
+            }
+            installed::InstalledModDeps {
+                ids,
+                title: row.name.clone(),
+                active: row.on && !row.missing,
+                requires,
+            }
+        })
+        .collect();
+    let statuses = installed::compute_dependency_status(&mods, &|id| {
+        index
+            .as_ref()
+            .and_then(|idx| idx.project(id).map(|p| p.name.clone()))
+    });
+    for (row, status) in rows.iter_mut().zip(statuses) {
+        row.required_by = status.required_by;
+        row.missing_deps = status.missing_deps;
+    }
 }
 
 /// What a missing-only removal did, for the notice.

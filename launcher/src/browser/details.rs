@@ -186,6 +186,33 @@ pub struct GitHub {
     pub stars: u64,
 }
 
+/// How a project relates to another project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DependencyKind {
+    Required,
+    Optional,
+    Incompatible,
+}
+
+impl DependencyKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Required => crate::i18n::tr("Required"),
+            Self::Optional => crate::i18n::tr("Optional"),
+            Self::Incompatible => crate::i18n::tr("Incompatible"),
+        }
+    }
+}
+
+/// A dependency declared by a project or version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dependency {
+    pub id: String,
+    pub name: Option<String>,
+    pub kind: DependencyKind,
+    pub version_req: Option<String>,
+}
+
 /// A project's page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Details {
@@ -204,6 +231,7 @@ pub struct Details {
     /// `required`, `optional`, `unsupported` or `unknown`.
     pub client_side: String,
     pub server_side: String,
+    pub dependencies: Vec<Dependency>,
 }
 
 fn strings(v: &Value) -> Vec<String> {
@@ -288,6 +316,7 @@ pub fn modrinth_details(project: &Value, members: &Value) -> Details {
         client_side: text(&project["client_side"]),
         server_side: text(&project["server_side"]),
         github: None,
+        dependencies: Vec::new(),
     }
 }
 

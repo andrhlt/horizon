@@ -81,6 +81,7 @@ fn entry(version: &str) -> installed::Entry {
         verdict: None,
         skipped: Vec::new(),
         namespaces: Vec::new(),
+        required_deps: Vec::new(),
     }
 }
 

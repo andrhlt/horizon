@@ -24,6 +24,7 @@ fn version(id: &str, games: &[&str], loaders: &[&str]) -> Version {
         }],
         required: Vec::new(),
         optional: Vec::new(),
+        dependencies: Vec::new(),
         blocked: None,
     }
 }

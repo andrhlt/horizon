@@ -1529,3 +1529,133 @@ fn an_old_native_path_that_is_not_a_file_is_left_alone() {
     assert!(!home.join("horizon-mods/coords_hud.hmod").exists());
     fs::remove_dir_all(&home).unwrap();
 }
+
+#[test]
+fn plan_install_resolves_transitively_skips_installed_handles_cycles_and_enforces_max_depth() {
+    let base = sample();
+    let template = base.project("coords_hud").unwrap().clone();
+    let make_mod = |id: &str, name: &str, requires: &[&str]| -> index::Project {
+        let mut p = template.clone();
+        p.id = id.into();
+        p.name = name.into();
+        p.versions[0].version = "1.0.0".into();
+        p.versions[0].requires = requires
+            .iter()
+            .map(|r| index::Requirement {
+                id: (*r).into(),
+                version: "1.0.0".into(),
+                sha256: String::new(),
+            })
+            .collect();
+        p
+    };
+
+    // 1. Transitive chain: app -> mid -> core
+    let mut index = base.clone();
+    index.projects = vec![
+        make_mod("app", "App", &["mid"]),
+        make_mod("mid", "Mid", &["core"]),
+        make_mod("core", "Core Lib", &[]),
+    ];
+    let home = scratch("dep-plan");
+    let empty = installed::Installed::default();
+    let planned: Vec<(String, bool)> = {
+        let app = index.project("app").unwrap();
+        let mut planner = InstallPlanner::new(&index, &home, &empty);
+        planner.add(app, &app.versions[0], false, 0).unwrap();
+        planner
+            .steps
+            .iter()
+            .map(|s| (s.project.id.clone(), s.dependency))
+            .collect()
+    };
+    assert_eq!(
+        planned,
+        [
+            ("core".into(), true),
+            ("mid".into(), true),
+            ("app".into(), false)
+        ]
+    );
+
+    // Structured dependencies resolve project names from the index.
+    let deps = dependencies_of(&index, &index.project("mid").unwrap().versions[0]);
+    assert_eq!(
+        deps,
+        vec![Dependency {
+            id: "core".into(),
+            name: Some("Core Lib".into()),
+            kind: DependencyKind::Required,
+            version_req: Some("1.0.0".into()),
+        }]
+    );
+
+    // 2. Skip already-installed dependency whose file is present.
+    let core_file = home.join("horizon-mods/core.hmod");
+    fs::create_dir_all(core_file.parent().unwrap()).unwrap();
+    fs::write(&core_file, b"ok").unwrap();
+    let already = installed::Installed {
+        entries: vec![installed::Entry {
+            source: SourceId::Horizon,
+            project: "core".into(),
+            slug: "core".into(),
+            title: "Core Lib".into(),
+            kind: Kind::Mod,
+            version: "1.0.0".into(),
+            number: "1.0.0".into(),
+            file: "horizon-mods/core.hmod".into(),
+            checksum: String::new(),
+            page: String::new(),
+            dependency: false,
+            verdict: None,
+            skipped: Vec::new(),
+            namespaces: Vec::new(),
+            required_deps: Vec::new(),
+        }],
+    };
+    let planned: Vec<(String, bool)> = {
+        let app = index.project("app").unwrap();
+        let mut planner = InstallPlanner::new(&index, &home, &already);
+        planner.add(app, &app.versions[0], false, 0).unwrap();
+        planner
+            .steps
+            .iter()
+            .map(|s| (s.project.id.clone(), s.dependency))
+            .collect()
+    };
+    assert_eq!(planned, [("mid".into(), true), ("app".into(), false)]);
+
+    // 3. Cycle protection: a -> b -> a terminates cleanly.
+    index.projects = vec![
+        make_mod("a", "Mod A", &["b"]),
+        make_mod("b", "Mod B", &["a"]),
+    ];
+    let planned: Vec<(String, bool)> = {
+        let mod_a = index.project("a").unwrap();
+        let mut planner = InstallPlanner::new(&index, &home, &empty);
+        planner.add(mod_a, &mod_a.versions[0], false, 0).unwrap();
+        planner
+            .steps
+            .iter()
+            .map(|s| (s.project.id.clone(), s.dependency))
+            .collect()
+    };
+    assert_eq!(planned, [("b".into(), true), ("a".into(), false)]);
+
+    // 4. MAX_DEPTH = 4 enforcement: depth 5 chain fails.
+    index.projects = vec![
+        make_mod("m0", "M0", &["m1"]),
+        make_mod("m1", "M1", &["m2"]),
+        make_mod("m2", "M2", &["m3"]),
+        make_mod("m3", "M3", &["m4"]),
+        make_mod("m4", "M4", &["m5"]),
+        make_mod("m5", "M5", &[]),
+    ];
+    let err = {
+        let m0 = index.project("m0").unwrap();
+        let mut planner = InstallPlanner::new(&index, &home, &empty);
+        planner.add(m0, &m0.versions[0], false, 0).unwrap_err()
+    };
+    assert!(err.contains("too deep"), "{err}");
+    fs::remove_dir_all(&home).unwrap();
+}

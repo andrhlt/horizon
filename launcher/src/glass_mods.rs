@@ -560,6 +560,18 @@ impl Launcher {
     fn glass_mod_detail(&mut self, instance: &str, cx: &mut Context<Self>) -> Option<Div> {
         let t = self.theme;
         let p = self.mods.picked_project()?;
+        if p.source != SourceId::Horizon {
+            self.mods_ensure_details(&p);
+        }
+        let deps = if p.source == SourceId::Horizon {
+            browser::horizon::project_dependencies(&p.id)
+        } else {
+            self.mods
+                .browse
+                .cached_details(p.source, &p.id)
+                .map(|d| d.dependencies.clone())
+                .unwrap_or_default()
+        };
         let icon = self.mods_icon(&p, 64.);
         let m = &self.mods;
         let support = m.support(&p);
@@ -587,6 +599,28 @@ impl Launcher {
             .filter(|_| p.source == SourceId::Horizon)
             .map(|lines| lines.join(" · "));
         let registry = about.is_some();
+
+        let remove_warning = entry.as_ref().and_then(|e| {
+            let confirming = m.confirm_remove.as_deref() == Some(e.project.as_str());
+            if !confirming {
+                return None;
+            }
+            let statuses =
+                installed::entries_dependency_status(&m.home(), &m.installed, m.java.is_some());
+            let idx = m
+                .installed
+                .iter()
+                .position(|x| x.source == e.source && x.project == e.project)?;
+            let req_by = &statuses.get(idx)?.required_by;
+            (!req_by.is_empty()).then(|| {
+                trf(
+                    "Required by {mods}. Removing it may break them.",
+                    &[("mods", &req_by.join(", "))],
+                )
+            })
+        });
+        let deps_section =
+            (!deps.is_empty()).then(|| self.glass_detail_dependencies(&deps, entry.is_some()));
 
         // The action: Remove (then Remove for good), Install or Import, or why not.
         let button: AnyElement = if let Some(e) = &entry {
@@ -722,6 +756,13 @@ impl Launcher {
                             &[("count", &super::thousands(p.downloads))],
                         )),
                 )
+                .children(deps_section.map(|d| d.mt(px(16.))))
+                .children(remove_warning.map(|warn| {
+                    ui::text(13., FontWeight::MEDIUM, 1.)
+                        .mt(px(16.))
+                        .text_color(ui::warn())
+                        .child(warn)
+                }))
                 .child(div().mt(px(24.)).child(button))
                 .child(
                     div().flex().justify_center().mt(px(12.)).child(
@@ -747,6 +788,72 @@ impl Launcher {
                     )
                 }),
         )
+    }
+
+    fn glass_detail_dependencies(
+        &self,
+        deps: &[browser::Dependency],
+        project_installed: bool,
+    ) -> Div {
+        use browser::DependencyKind;
+        let groups = [
+            (DependencyKind::Required, ui::warn()),
+            (DependencyKind::Optional, white(0.6)),
+            (DependencyKind::Incompatible, ui::danger()),
+        ];
+        let has_uninstalled_required = !project_installed
+            && deps.iter().any(|d| {
+                d.kind == DependencyKind::Required && !self.dependency_is_installed(&d.id)
+            });
+        let pill = |label: &str, color: Hsla| {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(px(20.))
+                .px(px(7.))
+                .rounded_full()
+                .bg(white(0.08))
+                .child(
+                    ui::text(11., FontWeight::MEDIUM, 1.)
+                        .text_color(color)
+                        .child(label.to_owned()),
+                )
+        };
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(ui::text(12., FontWeight::MEDIUM, 0.55).child(tr("Dependencies")));
+        if has_uninstalled_required {
+            section = section.child(
+                ui::text(12., FontWeight::NORMAL, 0.55)
+                    .child(tr("Required dependencies are installed automatically.")),
+            );
+        }
+        for (kind, color) in groups {
+            for dep in deps.iter().filter(|d| d.kind == kind) {
+                let is_installed = self.dependency_is_installed(&dep.id);
+                let label = dep.name.as_deref().unwrap_or(&dep.id).to_owned();
+                let mut row = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(ui::text(13., FontWeight::NORMAL, 0.85).child(label))
+                    .child(pill(kind.label(), color));
+                if is_installed {
+                    let (status_label, status_color) = if kind == DependencyKind::Incompatible {
+                        (tr("Installed (conflict)"), ui::danger())
+                    } else {
+                        (tr("Installed"), ui::live())
+                    };
+                    row = row.child(pill(status_label, status_color));
+                }
+                section = section.child(row);
+            }
+        }
+        section
     }
 }
 

@@ -16,6 +16,7 @@ pub mod java;
 pub mod java_instance;
 pub mod modrinth;
 
+pub use details::{Dependency, DependencyKind};
 pub use horizon_platform::mod_package::install_lock::{lock_home, try_lock_home, HomeLockGuard};
 
 use serde::{Deserialize, Serialize};
@@ -217,6 +218,8 @@ pub struct Version {
     /// Required dependencies, as project ids on the same source.
     pub required: Vec<String>,
     pub optional: Vec<modrinth::OptionalDependency>,
+    /// Structured dependencies (required, optional, incompatible).
+    pub dependencies: Vec<Dependency>,
     /// Why this version can't be downloaded from here (CurseForge authors can forbid it).
     pub blocked: Option<String>,
 }

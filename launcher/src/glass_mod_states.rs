@@ -67,6 +67,8 @@ fn row(name: &str, kind: ModKind, error: Option<&str>) -> ModRow {
         native: None,
         internals: Vec::new(),
         kind: Some((kind, name.into())),
+        required_by: Vec::new(),
+        missing_deps: Vec::new(),
     }
 }
 

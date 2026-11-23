@@ -305,6 +305,7 @@ impl Job<'_> {
             verdict: Some(check.verdict.label().to_owned()),
             skipped,
             namespaces: check.namespaces.clone(),
+            required_deps: version.required.clone(),
         };
         let mut installed = super::installed::Installed::load(home);
         installed

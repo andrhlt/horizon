@@ -1,6 +1,10 @@
 //! Modrinth's public API (api.modrinth.com/v2): no key, files with SHA-512 and SHA-1.
-use super::{details, FileRef, Kind, Project, Query, SearchPage, Source, SourceId, Version, GAME};
+use super::{
+    details::{self, Dependency, DependencyKind},
+    FileRef, Kind, Project, Query, SearchPage, Source, SourceId, Version, GAME,
+};
 use serde_json::Value;
+use std::collections::HashMap;
 
 const API: &str = "https://api.modrinth.com/v2";
 const SITE: &str = "https://modrinth.com";
@@ -156,6 +160,41 @@ pub(super) fn parse_project(p: &Value) -> Option<Project> {
     })
 }
 
+pub(super) fn parse_dependencies(list: &Value) -> Vec<Dependency> {
+    let mut out = Vec::new();
+    for d in list.as_array().into_iter().flatten() {
+        let kind = match d["dependency_type"].as_str() {
+            Some("required") => DependencyKind::Required,
+            Some("optional") => DependencyKind::Optional,
+            Some("incompatible") => DependencyKind::Incompatible,
+            _ => continue,
+        };
+        let id = d["project_id"]
+            .as_str()
+            .or_else(|| d["version_id"].as_str())
+            .or_else(|| d["file_name"].as_str());
+        let Some(id) = id.filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let version_req = d["version_id"]
+            .as_str()
+            .filter(|v| !v.is_empty() && *v != id)
+            .map(str::to_owned);
+        if !out
+            .iter()
+            .any(|existing: &Dependency| existing.id == id && existing.kind == kind)
+        {
+            out.push(Dependency {
+                id: id.to_owned(),
+                name: None,
+                kind,
+                version_req,
+            });
+        }
+    }
+    out
+}
+
 pub(super) fn parse_version(v: &Value) -> Option<Version> {
     let files = v["files"]
         .as_array()?
@@ -172,6 +211,7 @@ pub(super) fn parse_version(v: &Value) -> Option<Version> {
             })
         })
         .collect();
+    let structured_deps = parse_dependencies(&v["dependencies"]);
     let dependencies = v["dependencies"].as_array().into_iter().flatten();
     let required = dependencies
         .clone()
@@ -216,6 +256,7 @@ pub(super) fn parse_version(v: &Value) -> Option<Version> {
         files,
         required,
         optional,
+        dependencies: structured_deps,
         blocked,
     })
 }
@@ -258,6 +299,34 @@ impl OptionalDependency {
                 .iter()
                 .any(|loader| super::java::LOADERS.contains(&loader.as_str())))
     }
+}
+
+/// Projects' titles in one request (`GET /projects?ids=[…]`, at most 100 ids): id → title, for
+/// resolving dependency display names.
+fn project_titles(ids: &[String]) -> HashMap<String, String> {
+    if ids.is_empty() {
+        return HashMap::new();
+    }
+    let ids = &ids[..ids.len().min(100)];
+    let Ok(list) = serde_json::to_string(ids) else {
+        return HashMap::new();
+    };
+    let Ok(v) = get(&format!("{API}/projects?ids={}", encode(&list))) else {
+        return HashMap::new();
+    };
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let id = text(&p["id"]);
+            let title = p["title"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| p["slug"].as_str().filter(|s| !s.is_empty()))?
+                .to_owned();
+            (!id.is_empty()).then_some((id, title))
+        })
+        .collect()
 }
 
 /// Projects' icons in one request (`GET /projects?ids=[…]`, at most 100 ids): id → icon URL, for
@@ -350,7 +419,22 @@ impl Source for Modrinth {
         let id = encode(&project.id);
         let p = get(&format!("{API}/project/{id}"))?;
         let members = get(&format!("{API}/project/{id}/members")).unwrap_or_default();
-        Ok(details::modrinth_details(&p, &members))
+        let mut out = details::modrinth_details(&p, &members);
+        if let Ok(versions) = self.versions(project) {
+            let picked = super::pick(project.kind, &versions, true).or_else(|| versions.first());
+            if let Some(version) = picked {
+                let mut deps = version.dependencies.clone();
+                let dep_ids: Vec<String> = deps.iter().map(|d| d.id.clone()).collect();
+                let titles = project_titles(&dep_ids);
+                for dep in &mut deps {
+                    if dep.name.is_none() {
+                        dep.name = titles.get(&dep.id).cloned();
+                    }
+                }
+                out.dependencies = deps;
+            }
+        }
+        Ok(out)
     }
 
     fn tags(&self, kind: Kind) -> Result<details::Tags, String> {
@@ -439,5 +523,39 @@ mod search_page_tests {
         assert_eq!(last.projects[0].id, "does-fit");
         assert_eq!(last.next_offset, None);
         assert!(parse_search_page(&json!({}), &query).is_err());
+    }
+
+    #[test]
+    fn parses_required_optional_and_incompatible_dependencies() {
+        let deps = parse_dependencies(&json!([
+            {"project_id": "fabric-api", "dependency_type": "required"},
+            {"project_id": "modmenu", "version_id": "v1.2.3", "dependency_type": "optional"},
+            {"project_id": "optifabric", "dependency_type": "incompatible"},
+            {"project_id": "bundled-lib", "dependency_type": "embedded"},
+            {"project_id": "fabric-api", "dependency_type": "required"}
+        ]));
+        assert_eq!(
+            deps,
+            vec![
+                Dependency {
+                    id: "fabric-api".into(),
+                    name: None,
+                    kind: DependencyKind::Required,
+                    version_req: None,
+                },
+                Dependency {
+                    id: "modmenu".into(),
+                    name: None,
+                    kind: DependencyKind::Optional,
+                    version_req: Some("v1.2.3".into()),
+                },
+                Dependency {
+                    id: "optifabric".into(),
+                    name: None,
+                    kind: DependencyKind::Incompatible,
+                    version_req: None,
+                },
+            ]
+        );
     }
 }

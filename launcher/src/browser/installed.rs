@@ -47,6 +47,9 @@ pub struct Entry {
     /// A Java mod's namespaces: two installed mods never share one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub namespaces: Vec<String>,
+    /// Required dependency project/mod IDs recorded at install time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_deps: Vec<String>,
 }
 
 /// Whether `file` names something inside one of the folders the browser installs into, made of
@@ -473,6 +476,7 @@ pub(super) fn put(
             verdict: None,
             skipped: Vec::new(),
             namespaces: Vec::new(),
+            required_deps: step.version.required.clone(),
         };
         debug_assert!(path.ends_with(name));
         installed
@@ -631,6 +635,159 @@ pub fn install_datapack(
     });
     let _ = fs::remove_dir_all(&folder);
     result
+}
+
+/// Dependency relationships computed for one installed mod in an instance.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DependencyStatus {
+    /// Titles of other installed mods that require this mod.
+    pub required_by: Vec<String>,
+    /// Required dependencies that are missing or disabled in this instance.
+    pub missing_deps: Vec<String>,
+}
+
+/// Summary of one installed mod used to compute reverse and missing dependencies.
+#[derive(Clone, Debug)]
+pub struct InstalledModDeps {
+    /// Identifiers other mods may reference (project id, slug, manifest mod id).
+    pub ids: Vec<String>,
+    /// Display name shown in "Needed by {mods}" and removal warnings.
+    pub title: String,
+    /// Whether this mod is enabled and its file is present.
+    pub active: bool,
+    /// Required dependency identifiers declared by this mod.
+    pub requires: Vec<String>,
+}
+
+/// Computes `required_by` and `missing_deps` for each mod in `mods`.
+/// `resolve_name` optionally turns an unknown dependency id into a display title.
+pub fn compute_dependency_status(
+    mods: &[InstalledModDeps],
+    resolve_name: &dyn Fn(&str) -> Option<String>,
+) -> Vec<DependencyStatus> {
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (idx, m) in mods.iter().enumerate() {
+        for id in &m.ids {
+            if !id.is_empty() {
+                by_id.entry(id.as_str()).or_insert(idx);
+            }
+        }
+    }
+    let mut out = vec![DependencyStatus::default(); mods.len()];
+    for (i, m) in mods.iter().enumerate() {
+        for req in &m.requires {
+            if req.is_empty() || m.ids.iter().any(|id| id == req) {
+                continue;
+            }
+            if let Some(&target_idx) = by_id.get(req.as_str()) {
+                if target_idx == i {
+                    continue;
+                }
+                if !out[target_idx].required_by.contains(&m.title) {
+                    out[target_idx].required_by.push(m.title.clone());
+                }
+                if !mods[target_idx].active {
+                    let dep_name = if mods[target_idx].title.is_empty() {
+                        req.clone()
+                    } else {
+                        mods[target_idx].title.clone()
+                    };
+                    if !out[i].missing_deps.contains(&dep_name) {
+                        out[i].missing_deps.push(dep_name);
+                    }
+                }
+            } else {
+                let dep_name = resolve_name(req).unwrap_or_else(|| req.clone());
+                if !out[i].missing_deps.contains(&dep_name) {
+                    out[i].missing_deps.push(dep_name);
+                }
+            }
+        }
+    }
+    for status in &mut out {
+        status.required_by.sort();
+        status.missing_deps.sort();
+    }
+    out
+}
+
+/// Collects required dependency IDs for a tracked `entry` in `home` from:
+/// 1. `entry.required_deps` (recorded at install time),
+/// 2. local `.hmod` `horizon-mod.toml` `[dependencies]` (non-optional),
+/// 3. Horizon's in-memory registry index `v.requires`.
+pub fn entry_required_deps(home: &Path, entry: &Entry) -> Vec<String> {
+    let mut deps = entry.required_deps.clone();
+    if let Some(path) = entry.path(home) {
+        if let Ok(pkg) = horizon_platform::mod_package::manifest::Package::read(&path) {
+            for (id, dep) in &pkg.manifest.dependencies {
+                if !dep.details().optional && !deps.contains(id) {
+                    deps.push(id.clone());
+                }
+            }
+        }
+    }
+    if entry.source == SourceId::Horizon {
+        if let Some(index) = super::horizon::known_index() {
+            if let Some(proj) = index.project(&entry.project) {
+                let ver = proj
+                    .versions
+                    .iter()
+                    .find(|v| v.version == entry.version)
+                    .or_else(|| proj.versions.first());
+                if let Some(v) = ver {
+                    for req in &v.requires {
+                        if !deps.contains(&req.id) {
+                            deps.push(req.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deps
+}
+
+/// Computes dependency statuses for all tracked `entries` in `home` (for `mods_page` and
+/// removal confirmation).
+pub fn entries_dependency_status(
+    home: &Path,
+    entries: &[Entry],
+    java_instance: bool,
+) -> Vec<DependencyStatus> {
+    let index = super::horizon::known_index();
+    let mods: Vec<InstalledModDeps> = entries
+        .iter()
+        .map(|e| {
+            let mut ids = vec![e.project.clone()];
+            if !e.slug.is_empty() && e.slug != e.project {
+                ids.push(e.slug.clone());
+            }
+            if let Some(mid) = super::horizon::mod_id(e) {
+                if !ids.iter().any(|id| id == mid) {
+                    ids.push(mid.to_owned());
+                }
+            }
+            let missing = file_missing(home, e);
+            let on = if e.kind != Kind::Mod {
+                true
+            } else if java_instance {
+                super::java_instance::is_on(home, e)
+            } else {
+                super::horizon::mod_id(e).is_some_and(|id| super::java::is_enabled(home, id))
+            };
+            InstalledModDeps {
+                ids,
+                title: e.title.clone(),
+                active: on && !missing,
+                requires: entry_required_deps(home, e),
+            }
+        })
+        .collect();
+    compute_dependency_status(&mods, &|id| {
+        index
+            .as_ref()
+            .and_then(|idx| idx.project(id).map(|p| p.name.clone()))
+    })
 }
 
 #[cfg(test)]

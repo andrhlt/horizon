@@ -4,12 +4,12 @@
 //! (`horizon_platform::mod_package::index::check_file`: size, SHA-256, the author's signature, the file's own
 //! manifest), and files the index says were taken down are refused and turned off.
 use super::{
-    details::{Details, GitHub, Link},
+    details::{Dependency, DependencyKind, Details, GitHub, Link},
     download, installed, java, FileRef, Kind, Project, Query, Source, SourceId, Version, GAME,
 };
 use crate::i18n::{tr, trf};
 use horizon_platform::mod_package::index::{self, Index, Trust};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -484,6 +484,33 @@ fn project_of(index: &Index, p: &index::Project) -> Option<Project> {
     })
 }
 
+/// The dependencies of a Horizon registry project's newest version, resolved from the
+/// already-loaded index (never the network).
+pub fn project_dependencies(id: &str) -> Vec<Dependency> {
+    let Some(index) = known_index() else {
+        return Vec::new();
+    };
+    let Some(p) = index.project(id) else {
+        return Vec::new();
+    };
+    let Some(v) = p.versions.first() else {
+        return Vec::new();
+    };
+    dependencies_of(&index, v)
+}
+
+fn dependencies_of(index: &Index, v: &index::Version) -> Vec<Dependency> {
+    v.requires
+        .iter()
+        .map(|r| Dependency {
+            id: r.id.clone(),
+            name: index.project(&r.id).map(|m| m.name.clone()),
+            kind: DependencyKind::Required,
+            version_req: (!r.version.is_empty()).then(|| r.version.clone()),
+        })
+        .collect()
+}
+
 /// Version `v` of `p` as the browser shows it; blocked when taken down.
 fn version_of(index: &Index, p: &index::Project, v: &index::Version) -> Version {
     Version {
@@ -503,6 +530,7 @@ fn version_of(index: &Index, p: &index::Project, v: &index::Version) -> Version 
         }],
         required: v.requires.iter().map(|r| r.id.clone()).collect(),
         optional: Vec::new(),
+        dependencies: dependencies_of(index, v),
         blocked: index
             .revoked(&p.id, &v.file.sha256)
             .map(|r| format!("taken down: {}", r.reason))
@@ -772,6 +800,9 @@ impl Source for Registry {
                 url,
                 stars: p.stars,
             }),
+            dependencies: newest
+                .map(|v| dependencies_of(&index, v))
+                .unwrap_or_default(),
             ..Details::default()
         })
     }
@@ -850,6 +881,101 @@ pub fn install(
     install_from(&*index()?, local(), project, home, progress)
 }
 
+/// How deep required dependencies are followed when installing a Horizon registry mod.
+const MAX_DEPTH: usize = 4;
+
+struct InstallStep<'a> {
+    project: &'a index::Project,
+    version: &'a index::Version,
+    dependency: bool,
+}
+
+struct InstallPlanner<'a> {
+    index: &'a Index,
+    home: &'a Path,
+    installed: &'a installed::Installed,
+    visiting: HashSet<String>,
+    steps: Vec<InstallStep<'a>>,
+}
+
+impl<'a> InstallPlanner<'a> {
+    fn new(index: &'a Index, home: &'a Path, installed: &'a installed::Installed) -> Self {
+        Self {
+            index,
+            home,
+            installed,
+            visiting: HashSet::new(),
+            steps: Vec::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        p: &'a index::Project,
+        v: &'a index::Version,
+        dependency: bool,
+        depth: usize,
+    ) -> Result<(), String> {
+        if self.steps.iter().any(|s| s.project.id == p.id) || self.visiting.contains(&p.id) {
+            return Ok(());
+        }
+        if depth > MAX_DEPTH {
+            return Err(trf(
+                "{pack}'s dependencies go too deep.",
+                &[("pack", &p.name)],
+            ));
+        }
+        if dependency
+            && self
+                .installed
+                .find(SourceId::Horizon, &p.id)
+                .is_some_and(|e| !installed::file_missing(self.home, e))
+        {
+            return Ok(());
+        }
+        self.visiting.insert(p.id.clone());
+        if matches!(p.kind, index::Kind::Mod | index::Kind::NativeMod) {
+            for req in &v.requires {
+                let dep = self.index.project(&req.id).ok_or_else(|| {
+                    trf(
+                        "{pack} needs {dep}, which isn't in Horizon's registry.",
+                        &[("pack", &p.name), ("dep", &req.id)],
+                    )
+                })?;
+                let dep_version = if req.version.is_empty() {
+                    newest(self.index, dep)?
+                } else {
+                    dep.versions
+                        .iter()
+                        .find(|w| {
+                            w.version == req.version
+                                && (req.sha256.is_empty() || w.file.sha256 == req.sha256)
+                        })
+                        .or_else(|| dep.versions.iter().find(|w| w.version == req.version))
+                        .ok_or_else(|| {
+                            trf(
+                                "{pack} needs {dep} {version}, which isn't in Horizon's registry.",
+                                &[
+                                    ("pack", &p.name),
+                                    ("dep", &dep.name),
+                                    ("version", &req.version),
+                                ],
+                            )
+                        })?
+                };
+                self.add(dep, dep_version, true, depth + 1)?;
+            }
+        }
+        self.visiting.remove(&p.id);
+        self.steps.push(InstallStep {
+            project: p,
+            version: v,
+            dependency,
+        });
+        Ok(())
+    }
+}
+
 /// [`install`] from `index`.
 fn install_from(
     index: &Index,
@@ -868,7 +994,23 @@ fn install_from(
         crate::game_shader_api::said().map_err(|e| format!("{}: {e}.", p.name))?;
     }
     let v = newest(index, p)?;
-    install_version(index, local, p, v, home, progress).map(|e| vec![e])
+    let installed = installed::Installed::load(home);
+    let mut planner = InstallPlanner::new(index, home, &installed);
+    planner.add(p, v, false, 0)?;
+    let mut done = Vec::with_capacity(planner.steps.len());
+    for step in planner.steps {
+        let entry = install_version_with_dep(
+            index,
+            local,
+            step.project,
+            step.version,
+            step.dependency,
+            home,
+            progress,
+        )?;
+        done.push(entry);
+    }
+    Ok(done)
 }
 
 /// Downloads the newest version of the registry's data pack `project` into `folder`, checked
@@ -954,7 +1096,28 @@ fn install_version(
     home: &Path,
     progress: &dyn Fn(&str, f32),
 ) -> Result<installed::Entry, String> {
-    let entry = install_version_guarded(index, local, p, v, home, &|_| Ok(()), progress)?;
+    install_version_with_dep(index, local, p, v, false, home, progress)
+}
+
+fn install_version_with_dep(
+    index: &Index,
+    local: bool,
+    p: &index::Project,
+    v: &index::Version,
+    as_dependency: bool,
+    home: &Path,
+    progress: &dyn Fn(&str, f32),
+) -> Result<installed::Entry, String> {
+    let entry = install_version_guarded_with_dep(
+        index,
+        local,
+        p,
+        v,
+        as_dependency,
+        home,
+        &|_| Ok(()),
+        progress,
+    )?;
     // The player asked for this install: the mod starts on. An automatic update installs
     // through the guarded function alone, so it leaves the player's on/off choice as it was
     // (#10071).
@@ -1133,6 +1296,20 @@ fn install_version_guarded(
     guard: &dyn Fn(&Path) -> Result<(), String>,
     progress: &dyn Fn(&str, f32),
 ) -> Result<installed::Entry, String> {
+    install_version_guarded_with_dep(index, local, p, v, false, home, guard, progress)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn install_version_guarded_with_dep(
+    index: &Index,
+    local: bool,
+    p: &index::Project,
+    v: &index::Version,
+    as_dependency: bool,
+    home: &Path,
+    guard: &dyn Fn(&Path) -> Result<(), String>,
+    progress: &dyn Fn(&str, f32),
+) -> Result<installed::Entry, String> {
     let _lock = crate::browser::lock_home(home).map_err(|e| e.to_string())?;
     let project =
         project_of(index, p).ok_or_else(|| format!("{} can't be installed here.", p.name))?;
@@ -1263,10 +1440,11 @@ fn install_version_guarded(
         file: relative,
         checksum: format!("SHA-256:{}", v.file.sha256),
         page: project.page.clone(),
-        dependency: false,
+        dependency: as_dependency && old.as_ref().is_none_or(|o| o.dependency),
         verdict: Some(trust_label(trust).into()),
         skipped: Vec::new(),
         namespaces: Vec::new(),
+        required_deps: v.requires.iter().map(|r| r.id.clone()).collect(),
     };
     list.entries.retain(|e| !ours(e));
     list.entries.push(entry.clone());

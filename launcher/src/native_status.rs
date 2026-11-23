@@ -686,6 +686,7 @@ mod tests {
                 verdict: None,
                 skipped: vec![],
                 namespaces: vec![],
+                required_deps: vec![],
             }],
         }
         .save(&home)

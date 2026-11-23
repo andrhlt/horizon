@@ -100,6 +100,7 @@ impl Fake {
             files: vec![file],
             required: needs.iter().map(|s| s.to_string()).collect(),
             optional: Vec::new(),
+            dependencies: Vec::new(),
             blocked: None,
         };
         let mut served = body.to_vec();
@@ -787,4 +788,45 @@ fn data_packs_go_into_a_world_when_something_in_them_runs() {
         .collect();
     assert_eq!(names.len(), 4, "{names:?}");
     fs::remove_dir_all(world.parent().unwrap().parent().unwrap()).unwrap();
+}
+
+#[test]
+fn computes_required_by_and_missing_deps_including_disabled_mods() {
+    let mods = vec![
+        InstalledModDeps {
+            ids: vec!["core".into(), "core-slug".into()],
+            title: "Core".into(),
+            active: true,
+            requires: vec![],
+        },
+        InstalledModDeps {
+            ids: vec!["disabled_lib".into()],
+            title: "Disabled Lib".into(),
+            active: false,
+            requires: vec![],
+        },
+        InstalledModDeps {
+            ids: vec!["app".into()],
+            title: "App".into(),
+            active: true,
+            requires: vec!["core".into(), "disabled_lib".into(), "absent_lib".into()],
+        },
+        InstalledModDeps {
+            ids: vec!["plugin".into()],
+            title: "Plugin".into(),
+            active: true,
+            requires: vec!["core-slug".into()],
+        },
+    ];
+    let statuses = compute_dependency_status(&mods, &|id| {
+        (id == "absent_lib").then(|| "Absent Lib".into())
+    });
+    assert_eq!(statuses[0].required_by, ["App", "Plugin"]);
+    assert!(statuses[0].missing_deps.is_empty());
+    assert_eq!(statuses[1].required_by, ["App"]);
+    assert!(statuses[1].missing_deps.is_empty());
+    assert!(statuses[2].required_by.is_empty());
+    assert_eq!(statuses[2].missing_deps, ["Absent Lib", "Disabled Lib"]);
+    assert!(statuses[3].required_by.is_empty());
+    assert!(statuses[3].missing_deps.is_empty());
 }
