@@ -340,15 +340,9 @@ fn open_flat<'a>(
     game
 }
 
-#[test]
-#[ignore = "daily"]
-fn players_in_separate_regions_teleport_to_each_other_within_a_level_and_across_levels() {
-    let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
-    let home =
-        std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join("region-tp");
-    let _ = std::fs::remove_dir_all(&home);
-    let mut resources = None;
-    let mut game = open_flat(&mut resources, &root, &home);
+/// Makes `game` a dedicated server ticking by regions on this thread, open to the network on a free port of
+/// 127.0.0.1; returns the port.
+fn serve(game: &mut Game<'_>) -> u16 {
     // A dedicated server ticking by regions, on this thread.
     game.options.dedicated = Some(Vec::new());
     game.options.execution_role = crate::game::execution_role::ExecutionRole::DedicatedServer;
@@ -381,6 +375,19 @@ fn players_in_separate_regions_teleport_to_each_other_within_a_level_and_across_
     game.lan_host(settings, net, hub).unwrap();
     let port = game.lan.as_ref().unwrap().settings.port;
     assert_ne!(port, 0);
+    port
+}
+
+#[test]
+#[ignore = "daily"]
+fn players_in_separate_regions_teleport_to_each_other_within_a_level_and_across_levels() {
+    let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+    let home =
+        std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join("region-tp");
+    let _ = std::fs::remove_dir_all(&home);
+    let mut resources = None;
+    let mut game = open_flat(&mut resources, &root, &home);
+    let port = serve(&mut game);
 
     // Three bots join at the world spawn.
     let mut bots = Vec::new();
@@ -512,6 +519,124 @@ fn players_in_separate_regions_teleport_to_each_other_within_a_level_and_across_
             b.name
         );
     }
+}
+
+/// The entity ids the game's own residency table holds (what it would find a player or a hook by).
+fn table_ids(game: &Game<'_>) -> std::collections::HashSet<u32> {
+    let mut table = game.resident_entities.table.borrow_mut();
+    table.admitted_metadata().map(|(id, ..)| id).collect()
+}
+
+/// Players lent to regions are bound to the table of the game that ticks them (`Game::bind_lan_residents`), and a
+/// server that ticks them for a while never ends a tick with a residency operation open
+/// (`EntityTable::end_tick`, which `tick_server` turns into an error: `UnbalancedPass`) or with an entity pass
+/// left lifted (`Game::admit_entity_save`, which a save and a stop ask first: "entity pass is lifted").
+#[test]
+#[ignore = "daily"]
+fn lent_players_are_bound_to_their_region_and_no_tick_ends_unbalanced_or_with_a_pass_lifted() {
+    use horizon_client::join_seq::visibility::{pass_sites, passes_outstanding};
+    let root = std::path::PathBuf::from(std::env::var_os("HORIZON_TEST_RESOURCES").unwrap());
+    let home =
+        std::path::PathBuf::from(std::env::var_os("HORIZON_HOME").unwrap()).join("region-bind");
+    let _ = std::fs::remove_dir_all(&home);
+    let mut resources = None;
+    let mut game = open_flat(&mut resources, &root, &home);
+    let port = serve(&mut game);
+    let mut bots = Vec::new();
+    for name in ["Alpha", "Bravo", "Charlie"] {
+        let joining = std::thread::spawn(move || Bot::connect(port, name));
+        until(&mut game, "a bot's login", 120, |_| joining.is_finished());
+        let bot = joining.join().unwrap().unwrap();
+        BOTS.with(|b| {
+            b.borrow_mut().push(Arc::new(BotSeen {
+                name: bot.name,
+                seen: Arc::clone(&bot.seen),
+            }))
+        });
+        bots.push(bot);
+    }
+    until(&mut game, "the bots in the world", 120, |g| {
+        bots.iter()
+            .all(|b| find(g, b.name).is_some() && b.position().is_some())
+    });
+    let y = find(&mut game, "Alpha").unwrap().position[1];
+    for (name, at) in [("Bravo", [4800.5, y, 5.5]), ("Charlie", [-4800.5, y, 4800.5])] {
+        let conn = game
+            .lan
+            .as_ref()
+            .unwrap()
+            .hub
+            .guests
+            .iter()
+            .find(|g| g.name == name)
+            .unwrap()
+            .conn;
+        game.teleport_to(Target::Guest(conn), at, None, true);
+    }
+    until(&mut game, "three regions of the Overworld", 240, |g| {
+        regions_of(g, Dim::Overworld) == 3
+            && bots
+                .iter()
+                .all(|b| find(g, b.name).is_some_and(|h| h.region.is_some()))
+    });
+
+    // Every lent player is in the table of the game that holds them, and in no other.
+    let server_ids = table_ids(&game);
+    let mut lent = 0;
+    for set in game.regions.resident.values_mut() {
+        for slot in &mut set.games {
+            let _ = slot.home(Some(Instant::now()));
+            let Some(w) = slot.game.as_deref() else {
+                continue;
+            };
+            let held = table_ids(w);
+            for g in w.lan.as_ref().unwrap().hub.guests.iter().filter(|g| g.placed) {
+                lent += 1;
+                let id = g.entity_id as u32;
+                assert!(held.contains(&id), "{} is not in the table of their region", g.name);
+                assert!(
+                    !server_ids.contains(&id),
+                    "{} is still in the server's table",
+                    g.name
+                );
+            }
+        }
+    }
+    assert_eq!(lent, 3, "the three bots are lent");
+
+    // Ticks with the regions running: none may fail (`UnbalancedPass` ends `tick_server` with an error), and
+    // whenever every region is at rest no pass may be outstanding.
+    let (mut at_rest, mut leaked) = (0, Vec::new());
+    for tick in 0..600 {
+        game.tick_server(false).unwrap();
+        let mut resting = true;
+        for set in game.regions.resident.values_mut() {
+            for slot in &mut set.games {
+                resting &= slot.home(Some(Instant::now())).unwrap_or(false);
+            }
+        }
+        if resting {
+            at_rest += 1;
+            if passes_outstanding() != 0 {
+                leaked.push((tick, passes_outstanding(), pass_sites()));
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(at_rest > 0, "the regions were never at rest between two ticks");
+    assert!(
+        leaked.is_empty(),
+        "passes outstanding with every region at rest (set HORIZON_TRACE_PASSES=1 for where): {leaked:?}"
+    );
+    // What a save and a stop ask first.
+    let mut all_home = true;
+    for set in game.regions.resident.values_mut() {
+        for slot in &mut set.games {
+            all_home &= slot.home(None).unwrap_or(false);
+        }
+    }
+    assert!(all_home);
+    Game::admit_entity_save().expect("a save is admitted once every region is at rest");
 }
 
 /// A component's debug text with its strings spelled out (`JavaString([104, 105])` is `"hi"`).

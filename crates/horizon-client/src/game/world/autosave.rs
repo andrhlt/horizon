@@ -4,8 +4,17 @@ use super::*;
 
 impl Game<'_> {
     pub(super) fn admit_entity_save() -> Result<()> {
-        if !horizon_client::join_seq::visibility::passes_settled() {
-            return Err("entity pass is lifted".into());
+        use horizon_client::join_seq::visibility::{pass_sites, passes_outstanding};
+        let outstanding = passes_outstanding();
+        if outstanding != 0 {
+            // Which ones, when HORIZON_TRACE_PASSES is set (the place and thread that took each).
+            let sites = pass_sites();
+            let sites = if sites.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", sites.join("; "))
+            };
+            return Err(format!("entity pass is lifted ({outstanding} outstanding{sites})").into());
         }
         Ok(())
     }
