@@ -94,6 +94,11 @@ class SnbtDiffTests(unittest.TestCase):
         changed = {'attributes': [{'id': 'a', 'base': '2.0d'}, {'id': 'b', 'base': '3.0d'}]}
         self.assertEqual(fuzz.diff(a, changed), [('attributes[1].base', '1.0d', '3.0d')])
 
+    def test_tags_compare_as_a_set(self):
+        self.assertEqual(fuzz.diff({'Tags': ['"fz"', '"fz7"']}, {'Tags': ['"fz7"', '"fz"']}), [])
+        self.assertEqual(fuzz.diff({'Passengers': [{'Tags': ['"b"', '"a"']}]}, {'Passengers': [{'Tags': ['"a"', '"c"']}]}),
+                         [('Passengers[0].Tags[1]', '"b"', '"c"')])
+
 
 class ShrinkTests(unittest.TestCase):
     scenario = {'family': 'persist', 'seed': 1, 'steps': [
