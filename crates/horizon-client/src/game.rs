@@ -2643,7 +2643,7 @@ impl Game<'_> {
         held: Option<&ItemStack>,
         block_entity: Option<horizon_core::nbt::Tag>,
     ) -> Vec<ItemStack> {
-        let dynamic = self.pending.dynamic(pos);
+        let dynamic = self.pending.dynamic(pos, &self.items().component_defaults);
         let place =
             self.loot_place_with_block(pos.map(|v| f64::from(v) + 0.5), block_entity, Some(state));
         let (_, entity) = self.native_clicker();
