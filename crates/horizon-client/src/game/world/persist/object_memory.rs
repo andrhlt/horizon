@@ -525,7 +525,7 @@ impl Game<'_> {
             Some(self.pack.assets.registry),
             own,
         )?;
-        m.clean_stacks(&self.items().component_defaults);
+        m.clean_saved_stacks(&tag, &self.items().component_defaults);
         self.resolve_loaded_profession(&mut m);
         if horizon_client::mobs::camel::is_camel(m.species()) {
             horizon_client::mobs::camel::finish_load(&mut m, self.world.game_time);

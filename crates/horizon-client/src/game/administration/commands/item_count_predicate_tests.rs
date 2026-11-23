@@ -296,8 +296,7 @@ fn command_and_entity_stacks_are_built_against_the_world_prototypes() {
         )),
         None,
     );
-    assert_eq!(
-        canon(game.item_frames.last().and_then(|f| f.item.as_ref())),
-        None
-    );
+    let frame = game.item_frames.last().expect("the frame loads");
+    let item = frame.item.as_ref().expect("the frame keeps its item");
+    assert!(item.same_item_same_components(&plain), "{item:?}");
 }

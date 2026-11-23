@@ -2669,6 +2669,18 @@ impl Mob {
         }
     }
 
+    /// [`Self::clean_stacks`] on a mob decoded from its saved `tag`. A villager's
+    /// or piglin's carried stacks merge as they load (`SimpleContainer.fromItemList`),
+    /// so they are read again from `tag`, each taken in before it merges.
+    pub fn clean_saved_stacks(
+        &mut self,
+        tag: &horizon_core::nbt::Tag,
+        prototypes: &crate::item_data::ItemPrototypes,
+    ) {
+        villager::reload_container(self, tag, prototypes);
+        self.clean_stacks(prototypes);
+    }
+
     /// The name used by command replies: CustomName, style and all, comes before the type.
     pub fn command_name(&self) -> crate::text::Text {
         villager::command_name(self)

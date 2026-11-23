@@ -469,7 +469,7 @@ impl Game<'_> {
                     Some(self.pack.assets.registry),
                 )
                 .ok_or_else(stale)?;
-                new.clean_stacks(&self.items().component_defaults);
+                new.clean_saved_stacks(&tag, &self.items().component_defaults);
                 horizon_client::mobs::armor::prepare(&new, &self.motion.attributes);
                 self.resolve_loaded_profession(&mut new);
                 let unresolved = self
