@@ -1441,6 +1441,11 @@ mod tests {
                     })
                 })
                 .collect();
+            // The hub reads the events: a kick request waits for the one before it.
+            while logins.iter().any(|login| !login.is_finished()) {
+                lan.poll();
+                std::thread::sleep(Duration::from_millis(1));
+            }
             for login in logins {
                 assert_eq!(
                     login.join().unwrap(),
