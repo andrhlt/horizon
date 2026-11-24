@@ -1153,11 +1153,13 @@ mod section_tests {
             binding: &binding,
             subject: None,
         };
+        let actor_bounds = Aabb::new(Vec3::new(0.0, 64.0, 0.2), Vec3::new(0.6, 65.8, 0.8));
+        let requested = Vec3::new(2.0, 0.0, 0.0);
+        // `EntityMovementWorld` receives the actor's swept broadphase box,
+        // not its starting box. Match `resolve_world_movement` here so this
+        // direct provider assertion tests the same dispatch contract.
         let found = scene
-            .moving_structure_collisions(
-                EntityIdentity(1),
-                Aabb::new(Vec3::new(0.0, 64.0, 0.2), Vec3::new(0.6, 65.8, 0.8)),
-            )
+            .moving_structure_collisions(EntityIdentity(1), actor_bounds.expand_towards(requested))
             .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].uuid(), 501);
@@ -1167,15 +1169,8 @@ mod section_tests {
                 .unwrap()
                 .is_some()
         );
-        let moved = scene
-            .resolve(
-                Aabb::new(Vec3::new(0.0, 64.0, 0.2), Vec3::new(0.6, 65.8, 0.8)),
-                Vec3::new(2.0, 0.0, 0.0),
-                0.0,
-                false,
-            )
-            .unwrap();
-        assert!((moved.x - 0.4).abs() < 1.0e-6, "{moved:?}");
+        let moved = scene.resolve(actor_bounds, requested, 0.0, false).unwrap();
+        assert!((moved.x - 1.4).abs() < 1.0e-6, "{moved:?}");
     }
 
     /// Boxes swept through air, past torches (no collision shape), a fence (a shape
