@@ -1627,6 +1627,29 @@ fn source_until(revision: &str, stop: &dyn Fn() -> Result<(), String>) -> Result
     Ok(dir)
 }
 
+/// Unpacks the committed source snapshot carried by a developer install into this build's
+/// temporary staging directory. This deliberately avoids the shared downloaded-source cache.
+pub(super) fn source_from_snapshot(
+    revision: &str,
+    archive: &Path,
+    destination: &Path,
+    stop: &dyn Fn() -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    stop()?;
+    let _ = fs::remove_dir_all(destination);
+    fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+    let result = fs::File::open(archive)
+        .map_err(|e| e.to_string())
+        .and_then(|file| unpack_source(file, destination, stop));
+    if let Err(error) = result {
+        let _ = fs::remove_dir_all(destination);
+        stop()?;
+        return Err(error);
+    }
+    fs::write(destination.join(".horizon-revision"), revision).map_err(|e| e.to_string())?;
+    Ok(destination.to_owned())
+}
+
 /// GitHub's archive (`.tar.gz`) at `url`, unpacked into the fresh folder `partial`: the archive's
 /// one top folder, which is returned. Links are left out; at most `limit` bytes are unpacked.
 /// Unpacks the tar `reader` into `partial`, asking `stop` before each entry: its error ends the
@@ -2448,6 +2471,11 @@ fn pipeline(
         progress(Step::PrebuiltMods);
         let compiling = std::time::Instant::now();
         let route = prebuilt::Route::of(&projects);
+        let developer_source = if developer {
+            Some(crate::developer_install::source_archive(origin, &revision)?)
+        } else {
+            None
+        };
         append_log(&trf(
             "Native mods route: {route}.",
             &[("route", route.name())],
@@ -2463,6 +2491,7 @@ fn pipeline(
             &declared,
             &resolution,
             options.registry_consent,
+            developer_source.as_deref(),
             &|id, done, total| {
                 progress(Step::Mod {
                     id: id.to_owned(),

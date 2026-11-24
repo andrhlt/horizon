@@ -160,9 +160,10 @@ pub(super) fn build(
     rlibs: &HashMap<&str, PathBuf>,
     crates: &HashMap<&str, String>,
     sdk: &Identity,
+    developer_source: Option<&Path>,
     rustc: impl Fn(&str) -> std::process::Command,
 ) -> Result<Option<Patch>, String> {
-    let Some(prepared) = prepare(rust, game, out, projects, sdk)? else {
+    let Some(prepared) = prepare(rust, game, out, projects, sdk, developer_source)? else {
         return Ok(None);
     };
     // The patched crates, against the prebuilt game and the mods.
@@ -407,6 +408,7 @@ pub(super) fn prepare<'a>(
     out: &Path,
     projects: &[api::Project<'a>],
     sdk: &Identity,
+    developer_source: Option<&Path>,
 ) -> Result<Option<Prepared<'a>>, String> {
     let bundles: Vec<&Bundle> = projects
         .iter()
@@ -447,7 +449,15 @@ pub(super) fn prepare<'a>(
     } else {
         Some(super::mixins_patch::tool(rust, &|_| {})?)
     };
-    let source = super::source_until(sdk.commit(), &super::check_cancelled)?;
+    let source = match developer_source {
+        Some(archive) => super::source_from_snapshot(
+            sdk.commit(),
+            archive,
+            &out.join("source"),
+            &super::check_cancelled,
+        )?,
+        None => super::source_until(sdk.commit(), &super::check_cancelled)?,
+    };
     let started = std::time::Instant::now();
     let index = function_index(game, sdk.commit())?;
     // A filled loop's entry, or one whose loop function has rows, is copied like a mixin's target,
