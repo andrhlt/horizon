@@ -118,6 +118,10 @@ pub struct World {
     /// (the game's carrier transfers). Empty, one load, when no
     /// operation is in flight.
     pub carrier_fences: crate::carrier_fences::Fences,
+    /// Live moving-structure collision snapshots consumed by ordinary entity
+    /// movement. The game updates these as carriers move and removes them on
+    /// disassembly; snapshots share their immutable sparse block geometry.
+    pub moving_structures: Vec<horizon_world::carrier::contact::CarrierCollider>,
     /// Whether the world's `data/` folder already existed when the
     /// world opened — the carrier store's first-use gate. Captured at
     /// open, not at transfer time, so a folder created this session
@@ -269,6 +273,30 @@ impl Weather {
     }
 }
 impl World {
+    /// Insert or replace a live carrier's immutable collision geometry and
+    /// current placement. The gameplay carrier controller owns when this is
+    /// called and must remove the collider when the carrier is disassembled.
+    pub fn set_moving_structure(
+        &mut self,
+        collider: horizon_world::carrier::contact::CarrierCollider,
+    ) {
+        if let Some(existing) = self
+            .moving_structures
+            .iter_mut()
+            .find(|existing| existing.uuid() == collider.uuid())
+        {
+            *existing = collider;
+        } else {
+            self.moving_structures.push(collider);
+        }
+    }
+
+    /// Remove a live carrier collision snapshot by its stable identifier.
+    pub fn remove_moving_structure(&mut self, uuid: u128) {
+        self.moving_structures
+            .retain(|collider| collider.uuid() != uuid);
+    }
+
     /// Install loaded instances, retiring an existing column's block entities even
     /// when the new payload omits their positions. Initial loads need no world scan.
     pub fn load_chunk_block_entities(
@@ -330,6 +358,7 @@ impl World {
             capability_generations: Default::default(),
             block_entities: Default::default(),
             carrier_fences: Default::default(),
+            moving_structures: Vec::new(),
             carrier_data_existed_at_open: false,
             chest_openers: FxHashMap::default(),
             block_names: FxHashMap::default(),

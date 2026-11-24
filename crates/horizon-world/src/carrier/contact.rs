@@ -31,6 +31,7 @@
 use horizon_core::geometry::{Aabb, BlockHit, COLLISION_EPSILON, Direction, Vec3, VoxelShape};
 use horizon_core::position::BlockPos;
 use std::fmt;
+use std::sync::Arc;
 
 /// Design trust-boundary limit: a translation step moves at most one block
 /// per axis. Larger steps are refused, never clamped.
@@ -702,6 +703,84 @@ fn swept_contact_fraction(moving: &OrientedBox, delta: Vec3, obstacle: Aabb) -> 
     }
 }
 
+/// Time-parameterized SAT between two oriented boxes where `moving` sweeps
+/// along `delta`. This is used by the ordinary entity movement resolver when
+/// a player or entity crosses a transformed carrier cell.
+fn swept_oriented_contact_fraction(
+    moving: &OrientedBox,
+    delta: Vec3,
+    obstacle: &OrientedBox,
+) -> Option<f64> {
+    let center_offset = obstacle.center.subtract(moving.center);
+    let mut enter = f64::NEG_INFINITY;
+    let mut exit = f64::INFINITY;
+    let mut separated = false;
+    for_each_pair_sat_axis(&moving.axes, &obstacle.axes, |axis| {
+        if separated {
+            return;
+        }
+        let offset = center_offset.dot(axis);
+        let reach = projected_half(moving.half, &moving.axes, axis)
+            + projected_half(obstacle.half, &obstacle.axes, axis);
+        let gap = offset.abs() - reach;
+        let speed = delta.dot(axis);
+        if speed.abs() < 1.0e-12 {
+            if gap > COLLISION_EPSILON {
+                separated = true;
+            }
+            return;
+        }
+        let (first, second) = if speed > 0.0 {
+            ((offset - reach) / speed, (offset + reach) / speed)
+        } else {
+            ((offset + reach) / speed, (offset - reach) / speed)
+        };
+        enter = enter.max(first);
+        exit = exit.min(second);
+    });
+    if separated || enter > exit.min(1.0) {
+        return None;
+    }
+    let impact = enter.clamp(0.0, 1.0);
+    let mut separation_at = f64::NEG_INFINITY;
+    let mut touch_holds = false;
+    let mut touch_closes = false;
+    for_each_pair_sat_axis(&moving.axes, &obstacle.axes, |axis| {
+        let offset = center_offset.dot(axis) - delta.dot(axis) * impact;
+        let reach = projected_half(moving.half, &moving.axes, axis)
+            + projected_half(obstacle.half, &obstacle.axes, axis);
+        let gap = offset.abs() - reach;
+        separation_at = separation_at.max(gap);
+        if gap.abs() <= COLLISION_EPSILON {
+            if delta.dot(axis).abs() < 1.0e-12 || offset * delta.dot(axis) < 0.0 {
+                touch_holds = true;
+            } else {
+                touch_closes = true;
+            }
+        }
+    });
+    if separation_at < -COLLISION_EPSILON || (touch_closes && !touch_holds) {
+        Some(impact)
+    } else {
+        None
+    }
+}
+
+fn for_each_pair_sat_axis(a: &[Vec3; 3], b: &[Vec3; 3], mut f: impl FnMut(Vec3)) {
+    for axis in a.iter().chain(b) {
+        f(*axis);
+    }
+    for axis_a in a {
+        for axis_b in b {
+            let cross = axis_a.cross(*axis_b);
+            let length_squared = cross.length_squared();
+            if length_squared > 1.0e-18 {
+                f(cross.scale(length_squared.sqrt().recip()));
+            }
+        }
+    }
+}
+
 /// Broad-phase bounds inflation so end-of-step touching reaches the narrow
 /// phase.
 fn sweep_margin() -> Vec3 {
@@ -714,6 +793,94 @@ fn sweep_margin() -> Vec3 {
 pub struct CarrierGeometry {
     uuid: u128,
     cells: Vec<CarrierCell>,
+}
+
+/// A snapshot of one transformed carrier used by ordinary entity movement.
+/// The geometry is shared so the movement query does not clone block shapes.
+#[derive(Clone, Debug)]
+pub struct CarrierCollider {
+    geometry: Arc<CarrierGeometry>,
+    placement: RigidTransform,
+}
+
+impl CarrierCollider {
+    pub fn new(geometry: Arc<CarrierGeometry>, placement: RigidTransform) -> Self {
+        Self {
+            geometry,
+            placement,
+        }
+    }
+
+    /// The carrier identifier used to replace or remove this live collider.
+    pub fn uuid(&self) -> u128 {
+        self.geometry.uuid()
+    }
+
+    /// Conservative world-space bounds for broad-phase movement queries.
+    pub fn world_bounds(&self, budget: &ContactBudget) -> Result<Option<Aabb>, Refused> {
+        self.geometry
+            .oriented_boxes(&self.placement, budget.boxes)
+            .map(|(_, bounds)| bounds)
+    }
+
+    /// Clips an axis-aligned entity box against the carrier's transformed
+    /// block boxes and returns the safe fraction of its requested movement.
+    pub fn clip_entity_movement(
+        &self,
+        bounds: Aabb,
+        delta: Vec3,
+        budget: &ContactBudget,
+    ) -> Result<f64, Refused> {
+        let entity_center = bounds.center();
+        let entity_size = bounds.size().scale(0.5);
+        if !delta.is_finite() || !entity_center.is_finite() || !entity_size.is_finite() {
+            return Err(Refused::NonFinite);
+        }
+        let entity_bounds = bounds.expand_towards(delta).inflate(sweep_margin());
+        let moving = OrientedBox {
+            center: entity_center,
+            axes: WORLD_AXES,
+            half: entity_size,
+            local_cell: BlockPos::new(0, 0, 0),
+        };
+        let (carrier_boxes, _) = self
+            .geometry
+            .oriented_boxes(&self.placement, budget.boxes)?;
+        let mut iterations = 0;
+        let mut earliest = 1.0_f64;
+        for carrier_box in &carrier_boxes {
+            let carrier_bounds = oriented_bounds(carrier_box);
+            if !entity_bounds.intersects(carrier_bounds) {
+                continue;
+            }
+            iterations += 1;
+            if iterations > budget.iterations {
+                return Err(Refused::IterationBudget);
+            }
+            if let Some(impact) = swept_oriented_contact_fraction(&moving, delta, carrier_box) {
+                earliest = earliest.min(impact);
+            }
+        }
+        Ok(earliest)
+    }
+}
+
+fn oriented_bounds(oriented: &OrientedBox) -> Aabb {
+    let reach = Vec3::new(
+        oriented.axes[0].x.abs() * oriented.half.x
+            + oriented.axes[1].x.abs() * oriented.half.y
+            + oriented.axes[2].x.abs() * oriented.half.z,
+        oriented.axes[0].y.abs() * oriented.half.x
+            + oriented.axes[1].y.abs() * oriented.half.y
+            + oriented.axes[2].y.abs() * oriented.half.z,
+        oriented.axes[0].z.abs() * oriented.half.x
+            + oriented.axes[1].z.abs() * oriented.half.y
+            + oriented.axes[2].z.abs() * oriented.half.z,
+    );
+    Aabb::new(
+        oriented.center.subtract(reach),
+        oriented.center.add_vector(reach),
+    )
 }
 impl CarrierGeometry {
     /// Assembles the geometry, sorting cells by local position and refusing

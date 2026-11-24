@@ -564,6 +564,24 @@ impl EntityMovementWorld for SceneCollisions<'_, '_> {
     fn movement_border(&mut self, _: EntityIdentity, _: Aabb) -> io::Result<Option<VoxelShape>> {
         Ok(None)
     }
+    fn moving_structure_collisions(
+        &mut self,
+        _: EntityIdentity,
+        bounds: Aabb,
+    ) -> io::Result<Vec<horizon_world::carrier::contact::CarrierCollider>> {
+        let budget = horizon_world::carrier::contact::ContactBudget::default();
+        self.world
+            .moving_structures
+            .iter()
+            .filter_map(|collider| match collider.world_bounds(&budget) {
+                Ok(Some(carrier_bounds)) if carrier_bounds.intersects(bounds) => {
+                    Some(Ok(collider.clone()))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(io::Error::other(error))),
+            })
+            .collect()
+    }
 }
 impl DynamicSupportWorld for SceneCollisions<'_, '_> {
     type Error = io::Error;
@@ -1084,6 +1102,69 @@ mod section_tests {
             }
             true
         }
+    }
+
+    #[test]
+    fn scene_movement_provider_returns_registered_rotated_carrier() {
+        use horizon_core::position::BlockPos;
+        use horizon_world::carrier::contact::{
+            CarrierCell, CarrierCollider, CarrierGeometry, ContactBudget, RigidTransform,
+        };
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.local/horizon-client")
+            .join(horizon_core::VANILLA_VERSION);
+        if !root.join("cached-collision.nbt").exists() {
+            eprintln!("no prepared resources: skipped");
+            return;
+        }
+        let assets = crate::assets::Assets::load(&root).unwrap();
+        let render = assets
+            .reload(&horizon_assets::resource_source::ResourceRoot::directory(
+                root.to_path_buf(),
+            ))
+            .unwrap();
+        let binding = load(&root, assets.registry).unwrap();
+        let mut world = World::test_scene(&assets, &render, 3).unwrap();
+        let state = assets.registry.default_state("minecraft:oak_slab").unwrap();
+        let shape = {
+            let mut scene = SceneCollisions {
+                world: &world,
+                binding: &binding,
+                subject: None,
+            };
+            binding
+                .collision_shape(&mut scene, state, [0, 0, 0])
+                .unwrap()
+        };
+        let geometry = Arc::new(
+            CarrierGeometry::new(501, vec![CarrierCell::new(BlockPos::new(0, 0, 0), shape)])
+                .unwrap(),
+        );
+        let placement = RigidTransform::identity_at(Vec3::new(2.0, 64.0, 0.5))
+            .unwrap()
+            .rotated(Vec3::new(0.0, 1.0, 0.0), std::f64::consts::FRAC_PI_2)
+            .unwrap();
+        world.set_moving_structure(CarrierCollider::new(geometry, placement));
+        let mut scene = SceneCollisions {
+            world: &world,
+            binding: &binding,
+            subject: None,
+        };
+        let found = scene
+            .moving_structure_collisions(
+                EntityIdentity(1),
+                Aabb::new(Vec3::new(1.2, 64.0, 0.2), Vec3::new(1.8, 65.8, 0.8)),
+            )
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].uuid(), 501);
+        assert!(
+            found[0]
+                .world_bounds(&ContactBudget::default())
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Boxes swept through air, past torches (no collision shape), a fence (a shape

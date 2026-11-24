@@ -4,6 +4,7 @@ use crate::{
     block_collision_scan::{
         BlockCollisionScan, BlockCollisionWorld, CollisionScanError, scan_cells,
     },
+    carrier::contact::{CarrierCollider, ContactBudget},
     collision_context::CollisionContext,
     entity_obstruction::EntityIdentity,
 };
@@ -30,6 +31,15 @@ pub trait EntityMovementWorld {
         entity: EntityIdentity,
         bounds: Aabb,
     ) -> Result<Option<VoxelShape>, Self::Error>;
+    /// Carrier snapshots intersecting the entity's swept bounds. The default
+    /// keeps worlds without moving structures on the existing path.
+    fn moving_structure_collisions(
+        &mut self,
+        _entity: EntityIdentity,
+        _bounds: Aabb,
+    ) -> Result<Vec<CarrierCollider>, Self::Error> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct MovementRequest<'a> {
@@ -58,6 +68,17 @@ where
             entity_collision_bounds(request.movement, request.bounds, request.max_step),
         )
         .map_err(CollisionScanError::World)?;
+    let mut movement = request.movement;
+    let swept_bounds = request.bounds.expand_towards(movement);
+    for carrier in world
+        .moving_structure_collisions(request.entity, swept_bounds)
+        .map_err(CollisionScanError::World)?
+    {
+        let fraction = carrier
+            .clip_entity_movement(request.bounds, movement, &ContactBudget::default())
+            .map_err(CollisionScanError::Carrier)?;
+        movement = movement.scale(fraction);
+    }
     // Vanilla walks the whole box a movement expands to with no candidate
     // counter, so a movement big enough to pass the caller's budget is slow
     // there, never fatal (#6124: a legal movement_speed of 400 crossed more
@@ -66,13 +87,13 @@ where
     // sweep, and the step's own box raised by max_step.
     let sweep = request
         .bounds
-        .expand_towards(request.movement)
+        .expand_towards(movement)
         .expand_towards(Vec3::new(0.0, f64::from(request.max_step.max(0.0)), 0.0));
     let candidate_budget = scan_cells(sweep).map_or(request.candidate_budget, |cells| {
         cells.max(request.candidate_budget)
     });
     try_resolve_step_movement(
-        request.movement,
+        movement,
         request.bounds,
         request.max_step,
         request.on_ground,

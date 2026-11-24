@@ -214,8 +214,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::carrier::contact::{CarrierCell, CarrierCollider, CarrierGeometry, RigidTransform};
     use crate::registry::BlockStateId;
     use std::convert::Infallible;
+    use std::sync::Arc;
 
     /// Air, but a wall of stone one block thick at x = 2 from y = 64 up.
     struct Wall;
@@ -268,6 +270,63 @@ mod tests {
         }
     }
 
+    struct CarrierWorld(CarrierCollider);
+    impl BlockCollisionWorld for CarrierWorld {
+        type Error = Infallible;
+        type Chunk = ();
+        fn collision_chunk(&mut self, _: ChunkPos) -> Result<Option<()>, Infallible> {
+            Ok(Some(()))
+        }
+        fn collision_block(&mut self, _: (), _: BlockPos) -> Result<CollisionBlock, Infallible> {
+            Ok(CollisionBlock {
+                state: BlockStateId(0),
+                large_collision_shape: false,
+                moving_piston: false,
+                empty_shape: true,
+            })
+        }
+        fn is_suffocating(
+            &mut self,
+            _: (),
+            _: CollisionBlock,
+            _: BlockPos,
+        ) -> Result<bool, Infallible> {
+            Ok(false)
+        }
+        fn context_shape(
+            &mut self,
+            _: CollisionBlock,
+            _: BlockPos,
+            _: &CollisionContext<'_>,
+        ) -> Result<VoxelShape, Infallible> {
+            Ok(VoxelShape::empty())
+        }
+    }
+    impl EntityMovementWorld for CarrierWorld {
+        type Error = Infallible;
+        fn entity_collisions(
+            &mut self,
+            _: EntityIdentity,
+            _: Aabb,
+        ) -> Result<Vec<VoxelShape>, Infallible> {
+            Ok(Vec::new())
+        }
+        fn movement_border(
+            &mut self,
+            _: EntityIdentity,
+            _: Aabb,
+        ) -> Result<Option<VoxelShape>, Infallible> {
+            Ok(None)
+        }
+        fn moving_structure_collisions(
+            &mut self,
+            _: EntityIdentity,
+            _: Aabb,
+        ) -> Result<Vec<CarrierCollider>, Infallible> {
+            Ok(vec![self.0.clone()])
+        }
+    }
+
     fn set(boxes: &[[f64; 6]]) -> CollisionExclusions {
         let mut set = CollisionExclusions::default();
         set.set(boxes).unwrap();
@@ -293,6 +352,38 @@ mod tests {
         )
         .unwrap()
         .x
+    }
+
+    #[test]
+    fn ordinary_entity_movement_clips_against_a_rotated_partial_carrier_cell() {
+        let local_box = Aabb::new(Vec3::ZERO, Vec3::new(0.125, 1.0, 1.0));
+        let shape = VoxelShape::from_box(local_box).unwrap();
+        let geometry = Arc::new(
+            CarrierGeometry::new(41, vec![CarrierCell::new(BlockPos::new(0, 0, 0), shape)])
+                .unwrap(),
+        );
+        let placement = RigidTransform::identity_at(Vec3::new(2.0, 64.0, 0.5))
+            .unwrap()
+            .rotated(Vec3::new(0.0, 1.0, 0.0), std::f64::consts::FRAC_PI_2)
+            .unwrap();
+        let carrier = CarrierCollider::new(geometry, placement);
+        let bounds = Aabb::new(Vec3::new(0.0, 64.0, 0.2), Vec3::new(0.6, 65.8, 0.8));
+        let result = crate::world_movement::resolve_world_movement(
+            &mut CarrierWorld(carrier),
+            MovementRequest {
+                entity: EntityIdentity(77),
+                context: CollisionContext::empty(false),
+                bounds,
+                movement: Vec3::new(2.0, 0.0, 0.0),
+                max_step: 0.0,
+                on_ground: false,
+                candidate_budget: 1_000,
+            },
+        )
+        .unwrap();
+        assert!((result.x - 1.4).abs() < 1.0e-9, "resolved {result:?}");
+        assert_eq!(result.y, 0.0);
+        assert_eq!(result.z, 0.0);
     }
 
     #[test]

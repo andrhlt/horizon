@@ -75,6 +75,7 @@ pub enum CollisionScanError<E> {
     VisitBudget,
     World(E),
     Shape(ShapeError),
+    Carrier(crate::carrier::contact::Refused),
 }
 impl<E: std::fmt::Display> std::fmt::Display for CollisionScanError<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -86,6 +87,7 @@ impl<E: std::fmt::Display> std::fmt::Display for CollisionScanError<E> {
             Self::VisitBudget => f.write_str("collision scan candidate budget exhausted"),
             Self::World(error) => error.fmt(f),
             Self::Shape(error) => error.fmt(f),
+            Self::Carrier(error) => error.fmt(f),
         }
     }
 }
