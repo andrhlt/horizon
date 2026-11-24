@@ -334,11 +334,18 @@ impl Game<'_> {
                     let entity = EntityRef::new(level.epoch(), id);
                     self.native_entity_target(entity)?;
                     let [lo, hi] = self.entity_bounding_box(entity)?;
-                    bounds.intersects(Aabb::new(
+                    let box_bounds = Aabb::new(
                         Vec3::new(lo[0], lo[1], lo[2]),
                         Vec3::new(hi[0], hi[1], hi[2]),
-                    ))
-                    .then_some(entity)
+                    );
+                    // Marker entities intentionally have a zero-volume box. AABB
+                    // intersection excludes that point, but bounded special-entity
+                    // lookup must still find a marker whose position is in range.
+                    let point = lo == hi
+                        && lo.iter().zip(min.iter().zip(max.iter())).all(
+                            |(value, (lower, upper))| *lower <= *value && *value <= *upper,
+                        );
+                    (point || bounds.intersects(box_bounds)).then_some(entity)
                 })
                 .collect(),
         )
