@@ -383,6 +383,18 @@ pub struct MobRender<'a> {
     pub death_time: i32,
     pub on_ground: bool,
 }
+
+/// A living entity's vanilla model transform for this draw frame. A mod may adjust these values
+/// from `render_living_pre`; the change applies only to this frame and never changes world state.
+#[derive(Clone, Copy, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+pub struct EntityRenderTransform {
+    /// Interpolated world position at the frame's partial tick.
+    pub position: [f64; 3],
+    /// World yaw in degrees.
+    pub yaw: f32,
+    /// World pitch in degrees.
+    pub pitch: f32,
+}
 // no wire: borrowed call-scoped view; transport uses owned snapshots rather than serializing references.
 /// Which player a [`MobRender`] is, for `render_player_pre` and
 /// `render_player_post`.

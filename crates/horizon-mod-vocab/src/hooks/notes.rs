@@ -1065,7 +1065,7 @@ steers a mob through the engine's own controls, each a momentary wish the mob's 
 
 ### Mobs drawn by a mod
 
-`crates/horizon-client/src/game/modding/native_mob_draw.rs`: `render_living_pre(entity, draw, hidden, canceled)` (client) is asked
+`crates/horizon-client/src/game/modding/native_mob_draw.rs`: `render_living_pre(entity, entity_uuid, transform, draw, hidden, canceled)` (client) is asked
 once a frame for every mob and player in view, before its model (NeoForge's `RenderLivingEvent.Pre`). Set `canceled` and nothing
 more of it draws this frame: model, layers, name tag, shadow, flames, leash, outline and `render_living_post`.
 
@@ -1073,6 +1073,10 @@ more of it draws this frame: model, layers, name tag, shadow, flames, leash, out
   `age` (ticks lived plus the partial tick), `body_yaw`, `head_yaw` (from the body) and `pitch` in degrees, the walk cycle
   (`walk_position`, `walk_speed`: a vanilla quadruped's legs swing `cos(walk_position * 0.6662) * 1.4 * walk_speed` radians), `hurt_time`,
   `death_time` and `on_ground`.
+- `entity_uuid` is the entity's authoritative network UUID. `transform` starts at the interpolated world position, yaw and
+  pitch. A finite change applies to this frame's vanilla model, armor and entity-attached layers; it does not alter gameplay,
+  entity tracking or packets. Invalid values are ignored. The `draw` pose remains the original entity frame so addon geometry
+  can remain attached to its source state.
 - `draw` is a block entity's frame (`block_entity_submit`): draw with `native_draw_cube`, `native_draw_quad`,
   `native_draw_block` and `native_draw_item` under its pose stack, which starts at the mob's feet turned with its body: +z
   is the way it faces, +x its left, +y up, in blocks. Turn a head or swing a leg with `rotate_about` and a pivot. It holds

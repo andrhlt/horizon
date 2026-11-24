@@ -5,7 +5,7 @@
 use super::Game;
 use horizon_client::{mesher::Vertex, mobs::Mob};
 use mod_api::{
-    BlockEntityDrawContext, Hooks, RenderLivingPostEvent, RenderLivingPreEvent,
+    BlockEntityDrawContext, EntityRenderTransform, Hooks, RenderLivingPostEvent, RenderLivingPreEvent,
     RenderPlayerPostEvent, RenderPlayerPreEvent,
 };
 use std::sync::{Arc, Mutex};
@@ -16,6 +16,7 @@ struct Heard {
     events: Vec<String>,
     /// Entity ids whose `render_living_pre` it cancels.
     cancel_living: Vec<u32>,
+    render_transform: Option<EntityRenderTransform>,
     /// Whether it cancels `render_player_pre` of this window's own player (`true`) or another.
     cancel_player: Vec<bool>,
 }
@@ -55,6 +56,9 @@ impl Hooks for Pair {
         heard.events.push(format!("living_pre {}", event.entity.id));
         marker(event.draw);
         event.cancelled = heard.cancel_living.contains(&event.entity.id);
+        if let Some(transform) = heard.render_transform {
+            event.transform = transform;
+        }
         mod_api::Flow::Continue
     }
     fn render_living_post(
@@ -120,6 +124,29 @@ fn with_pair(heard: &Arc<Mutex<Heard>>, check: impl FnOnce(&mut Game<'_>)) {
             game.mobs.clear();
             check(game);
         });
+    });
+}
+
+#[test]
+fn living_pre_applies_frame_transform_to_vanilla_model_only() {
+    let heard = Arc::new(Mutex::new(Heard {
+        render_transform: Some(EntityRenderTransform {
+            position: [10.5, 64.0, 0.5],
+            yaw: 90.0,
+            pitch: 0.0,
+        }),
+        ..Default::default()
+    }));
+    with_pair(&heard, |game| {
+        game.mobs.push(mob(game, "minecraft:zombie", 91, 0.0));
+        let out = mob_frame(game);
+        let vanilla_model: Vec<_> = out.iter().filter(|vertex| vertex.pos[1] < 5.0).collect();
+        assert!(!vanilla_model.is_empty(), "vanilla model geometry was rendered");
+        assert!(
+            vanilla_model.iter().all(|vertex| vertex.pos[0] > 8.0),
+            "vanilla model should use the frame-only world position"
+        );
+        assert_eq!(markers(&out), 4, "addon geometry stays at its original pose");
     });
 }
 

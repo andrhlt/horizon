@@ -9,10 +9,12 @@ impl Game<'_> {
     pub(in crate::game) fn native_render_living_pre(
         &self,
         entity: &MobRender<'_>,
+        entity_uuid: u128,
+        transform: &mut mod_api::EntityRenderTransform,
         draw: &mut BlockEntityDraw,
         hidden: &mut HiddenParts,
         canceled: &mut bool,
     ) {
-        self.fire_render_living_pre(entity, draw, hidden, canceled);
+        self.fire_render_living_pre(entity, entity_uuid, transform, draw, hidden, canceled);
     }
 }

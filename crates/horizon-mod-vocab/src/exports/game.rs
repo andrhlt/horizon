@@ -5,8 +5,9 @@ pub use crate::game::NbtUpgradeError;
 pub use crate::game::TerrainColumn;
 pub use crate::game::{
     BlockEdit, BlockRun, Clock, ColumnBlocks, Config, ConfigFile, ConfigKind, CubeFace,
-    DataMapType, ExperienceOrb, Falling, Heightmap, HeldItemSlot, Hit, MapDecoration, MapInfo,
-    MobRender, ModEvent, ModMismatch, ModMismatchResolution, PhantomSpawnResult, PlayerRender,
+    DataMapType, EntityRenderTransform, ExperienceOrb, Falling, Heightmap, HeldItemSlot, Hit,
+    MapDecoration, MapInfo, MobRender, ModEvent, ModMismatch, ModMismatchResolution,
+    PhantomSpawnResult, PlayerRender,
     Shake, SleepProblem,
 };
 mod __private {

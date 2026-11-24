@@ -818,9 +818,12 @@ impl Game<'_> {
         };
         let listened = self.mob_render_listened();
         let pre = self.mod_render_pre(m, Some(who), listened, alpha as f32, camera, packed, out);
-        let Some(hidden) = pre else {
+        let Some((hidden, transform)) = pre else {
             return;
         };
+        let rendered_mob = transform
+            .and_then(|transform| super::native_mob_draw::mob_with_render_transform(m, transform));
+        let m = rendered_mob.as_ref().unwrap_or(m);
         // The mods' layers' posed parts, kept from the draw below while they want them.
         let (mut parts, layers) = (None, self.mod_layers(m));
         // A spectator still draws its own model in third person: the poses'

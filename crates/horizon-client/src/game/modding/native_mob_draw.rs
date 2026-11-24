@@ -18,7 +18,7 @@ use horizon_client::{
     mesher::Vertex,
     mobs::{Mob, Species, anim, render, villager},
 };
-use mod_api::{EntityRenderState, HiddenParts, HookId, PosedParts};
+use mod_api::{EntityRenderState, EntityRenderTransform, HiddenParts, HookId, PosedParts};
 use std::cell::RefCell;
 
 /// What the frame's entity pass decided about the mods' render hooks: whether any mod listens to
@@ -32,6 +32,37 @@ struct EntityFrame {
 thread_local! {
     /// The frame being drawn on this thread.
     static FRAME: RefCell<EntityFrame> = RefCell::default();
+}
+
+/// Applies a mod's render-only pose without changing the world entity used by gameplay or packets.
+pub(super) fn mob_with_render_transform(
+    mob: &Mob,
+    transform: EntityRenderTransform,
+) -> Option<Mob> {
+    if !transform.position.into_iter().all(f64::is_finite)
+        || transform.position.iter().any(|value| value.abs() > 30_000_000.0)
+        || !transform.yaw.is_finite()
+        || !transform.pitch.is_finite()
+    {
+        return None;
+    }
+    let mut rendered = mob.clone();
+    let position = horizon_core::geometry::Vec3::new(
+        transform.position[0],
+        transform.position[1],
+        transform.position[2],
+    );
+    rendered.position = position;
+    rendered.previous = position;
+    rendered.yaw = transform.yaw;
+    rendered.previous_yaw = transform.yaw;
+    rendered.body_yaw = transform.yaw;
+    rendered.previous_body_yaw = transform.yaw;
+    rendered.head_yaw = transform.yaw;
+    rendered.previous_head_yaw = transform.yaw;
+    rendered.head_pitch = transform.pitch;
+    rendered.previous_head_pitch = transform.pitch;
+    Some(rendered)
 }
 
 /// Starts a frame's entity pass: asks once whether any mod listens to the render hook pair, and
@@ -172,12 +203,32 @@ impl Game<'_> {
         camera: DVec3,
         light: u32,
         out: &mut Vec<Vertex>,
-    ) -> Option<HiddenParts> {
+    ) -> Option<(HiddenParts, Option<EntityRenderTransform>)> {
         let mut hidden = HiddenParts::default();
         if !listened {
-            return Some(hidden);
+            return Some((hidden, None));
         }
         let local = who.as_ref().is_some_and(|who| who.local);
+        let fraction = partial.clamp(0.0, 1.0);
+        let entity_uuid = self
+            .persist
+            .uuids
+            .get(&mob.id)
+            .copied()
+            .map(horizon_client::lan::playerdata::ints_uuid)
+            .unwrap_or_default();
+        let mut transform = EntityRenderTransform {
+            position: std::array::from_fn(|axis| {
+                let previous = mob.previous.components()[axis];
+                previous
+                    + (mob.position.components()[axis] - previous) * f64::from(fraction)
+            }),
+            yaw: mob.previous_yaw
+                + horizon_client::mobs::living::wrap(mob.yaw - mob.previous_yaw) * fraction,
+            pitch: mob.previous_head_pitch
+                + (mob.head_pitch - mob.previous_head_pitch) * fraction,
+        };
+        let original_transform = transform;
         let mut canceled = false;
         if let Some(who) = &who {
             self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
@@ -186,7 +237,14 @@ impl Game<'_> {
         }
         if !canceled {
             self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
-                self.native_render_living_pre(render, draw, &mut hidden, &mut canceled);
+                self.native_render_living_pre(
+                    render,
+                    entity_uuid,
+                    &mut transform,
+                    draw,
+                    &mut hidden,
+                    &mut canceled,
+                );
             });
             if canceled && let Some(who) = &who {
                 self.mod_entity_draw(mob, local, partial, camera, light, out, |render, draw| {
@@ -195,7 +253,10 @@ impl Game<'_> {
             }
         }
         if !canceled {
-            return Some(hidden);
+            return Some((
+                hidden,
+                (transform != original_transform).then_some(transform),
+            ));
         }
         let id = render_id(mob.id, local, self.own_entity_id());
         FRAME.with_borrow_mut(|frame| frame.canceled.insert(id));

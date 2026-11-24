@@ -4,7 +4,10 @@ pub trait Hooks {
     /// Before a living entity is drawn (NeoForge's `RenderLivingEvent.Pre`): once a frame for each
     /// mob and player in view (one the frame culls is not asked), before its pose, model and
     /// layers. `entity` is its render state (its id, kind, custom name, the frame's partial tick,
-    /// its body and head turns and walk cycle, `LivingEntityRenderState`). `draw` is posed at its
+    /// its body and head turns and walk cycle, `LivingEntityRenderState`). `entity_uuid` is its
+    /// network UUID. `transform` starts at the interpolated world position, yaw and pitch; changing
+    /// it adjusts only the vanilla model transform for this frame. It does not move the entity or
+    /// change gameplay state. `draw` is posed at its
     /// feet, turned with its body: +z the way it faces, +x its left, +y up, in blocks, with the
     /// helpers block entities draw with (`cube`, `quad`, `block`, `item`, `model_part`); what it
     /// draws is kept. Set `canceled` to skip all of the entity's drawing this frame: its model,
@@ -20,7 +23,7 @@ pub trait Hooks {
     /// `draw.keep()` does nothing here.
     #[hook(
         side = "client",
-        version = 2,
+        version = 3,
         contract = "cancel",
         out = "canceled",
         neoforge = "RenderLivingEvent.Pre",

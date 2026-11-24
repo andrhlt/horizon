@@ -8004,7 +8004,7 @@ impl Game<'_> {
                 .flatten()
                 .map(|name| PlayerRender { name, local: false });
             let pre = self.mod_render_pre(mob, who, listened, alpha as f32, camera, packed, out);
-            let Some(hidden) = pre else {
+            let Some((hidden, transform)) = pre else {
                 // What the mods drew in its place is culled as the entity's own would be.
                 if culling.rays_only() {
                     self.ray_only(out, entity_start);
@@ -8014,6 +8014,9 @@ impl Game<'_> {
                 self.lit_posed_entity(entity_start..out.len(), posed_start);
                 continue;
             };
+            let rendered_mob = transform
+                .and_then(|transform| super::native_mob_draw::mob_with_render_transform(mob, transform));
+            let mob = rendered_mob.as_ref().unwrap_or(mob);
             // A mod's renderer for the type (`register_entity_renderers`) draws in place of its
             // model and vanilla layers; the mods' layers and post hooks still follow.
             let modded = self.mod_living_renderer_geometry(mob, alpha as f32, camera, packed, out);
