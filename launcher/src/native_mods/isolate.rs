@@ -143,6 +143,7 @@ mod tests {
             id: id.into(),
             requirement: semver::VersionReq::STAR,
             optional,
+            library: false,
             side: horizon_platform::mod_package::manifest::Side::Both,
             reason: None,
             url: None,

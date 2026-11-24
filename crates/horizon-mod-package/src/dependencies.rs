@@ -116,6 +116,7 @@ pub struct Dependency {
     pub id: String,
     pub requirement: VersionReq,
     pub optional: bool,
+    pub library: bool,
     pub features: Vec<String>,
     pub side: Side,
     pub reason: Option<String>,
@@ -138,6 +139,7 @@ pub fn from_manifest(
                 id: id.clone(),
                 requirement: details.version,
                 optional: details.optional,
+                library: details.library,
                 features: details.features,
                 side: details.side,
                 reason: details.reason,
@@ -1171,6 +1173,16 @@ mod tests {
                 .get("optional")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn preserves_explicit_native_library_dependency_role() {
+        let library_deps = deps(
+            "[dependencies]\nrapier3d = { version = '=0.32.0', library = true, features = ['dim3'] }",
+        );
+        assert!(library_deps[0].library);
+        let ordinary = deps("[dependencies]\naddon = '=1.0.0'");
+        assert!(!ordinary[0].library);
     }
 
     #[test]

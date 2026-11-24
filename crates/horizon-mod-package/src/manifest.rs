@@ -144,6 +144,10 @@ pub struct DependencyDetails {
     pub version: semver::VersionReq,
     #[serde(default)]
     pub optional: bool,
+    /// The dependency is a native sibling library, not a Horizon hook owner.
+    /// This only affects native staging; it does not alter dependency ordering.
+    #[serde(default)]
+    pub library: bool,
     /// Cargo features to enable when this dependency is staged as a native package.
     #[serde(default)]
     pub features: Vec<String>,
@@ -168,6 +172,7 @@ impl Dependency {
             Self::Version(version) => DependencyDetails {
                 version: version.clone(),
                 optional: false,
+                library: false,
                 features: Vec::new(),
                 side: Side::Both,
                 reason: None,
