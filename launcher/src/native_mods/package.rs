@@ -339,7 +339,10 @@ mod runtime_manifest_tests {
         let runtime_path = runtime.join(horizon_platform::mod_package::manifest::MANIFEST);
         let text = std::fs::read_to_string(runtime_path).unwrap();
         let manifest: toml::Table = text.parse().unwrap();
-        assert!(!manifest["dependencies"].as_table().unwrap().contains_key("rapier3d"));
+        assert!(!manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("rapier3d"));
         assert!(std::fs::read_to_string(source)
             .unwrap()
             .contains("library = true"));

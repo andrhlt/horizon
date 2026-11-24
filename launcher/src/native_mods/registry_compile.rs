@@ -371,11 +371,12 @@ pub(super) fn compile(
                 }
             }
         }
-        if !is_library && (internals::needed(&bundle.manifest)
-            || project
-                .api_dependencies()
-                .iter()
-                .any(|(_, package)| *package == "internals"))
+        if !is_library
+            && (internals::needed(&bundle.manifest)
+                || project
+                    .api_dependencies()
+                    .iter()
+                    .any(|(_, package)| *package == "internals"))
         {
             let facade = &generated[id.as_str()];
             let facade_relative = internals::relative(id);
