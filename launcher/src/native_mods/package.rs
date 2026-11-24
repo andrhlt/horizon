@@ -118,12 +118,20 @@ pub(super) fn copy_runtime(bundle: &Bundle, to: &Path) -> Result<(), String> {
         .get_mut("dependencies")
         .and_then(toml::Value::as_table_mut)
     {
-        for (_, dependency) in dependencies.iter_mut() {
+        dependencies.retain(|_, dependency| {
             if let Some(details) = dependency.as_table_mut() {
+                if details
+                    .get("library")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
                 details.remove("features");
                 details.remove("library");
             }
-        }
+            true
+        });
     }
     *manifest_bytes = toml::to_string(&manifest)
         .map_err(|e| e.to_string())?
@@ -333,10 +341,7 @@ mod runtime_manifest_tests {
         let runtime_path = runtime.join(horizon_platform::mod_package::manifest::MANIFEST);
         let text = std::fs::read_to_string(runtime_path).unwrap();
         let manifest: toml::Table = text.parse().unwrap();
-        let dependency = manifest["dependencies"]["rapier3d"].as_table().unwrap();
-        assert_eq!(dependency["version"].as_str(), Some("=0.32.0"));
-        assert!(!dependency.contains_key("library"));
-        assert!(!dependency.contains_key("features"));
+        assert!(!manifest["dependencies"].as_table().unwrap().contains_key("rapier3d"));
         assert!(std::fs::read_to_string(source)
             .unwrap()
             .contains("library = true"));
