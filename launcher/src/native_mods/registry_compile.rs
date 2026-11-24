@@ -106,12 +106,17 @@ pub(super) fn compile(
             )
         })
         .collect();
-    // A package named by a mod dependency is a library input, not another Horizon
-    // hook owner. Keep the classification tied to the resolved dependency graph:
-    // Cargo features are forwarded on the parent->library edge, while the library
-    // itself must compile as ordinary Rust without the generated hook entry or SDK
-    // extern injection.
-    let library_packages = declared_library_packages(&packages, declared);
+    // Only an explicitly marked package named by a mod dependency is a library
+    // input, not another Horizon hook owner. Cargo features are forwarded on the
+    // parent->library edge, while the library itself compiles as ordinary Rust
+    // without the generated hook entry or SDK extern injection. Ordinary dependent
+    // mods remain hook owners.
+    let library_ids: std::collections::BTreeSet<&str> = projects
+        .iter()
+        .filter(|project| project.is_native_library())
+        .map(|project| project.bundle.manifest.id.as_str())
+        .collect();
+    let library_packages = declared_library_packages(&packages, &library_ids, declared);
     for (position, &index) in resolution.order.iter().enumerate() {
         let project = &projects[index];
         let bundle = project.bundle;
@@ -551,12 +556,14 @@ pub(super) fn compile(
 
 fn declared_library_packages<'a>(
     packages: &BTreeMap<&'a str, &'a str>,
+    library_ids: &std::collections::BTreeSet<&str>,
     declared: &[Vec<dependencies::Dependency>],
 ) -> std::collections::BTreeSet<&'a str> {
     declared
         .iter()
         .flat_map(|dependencies| dependencies.iter())
         .map(|dependency| dependency.id.as_str())
+        .filter(|id| library_ids.contains(id))
         .filter_map(|id| packages.get(id).copied())
         .collect()
 }
@@ -599,6 +606,7 @@ mod tests {
             ("rapier3d", "rapier3d"),
             ("unrelated", "unrelated"),
         ]);
+        let library_ids = std::collections::BTreeSet::from(["rapier3d"]);
         let declared = vec![vec![dependencies::Dependency {
             id: "rapier3d".into(),
             requirement: semver::VersionReq::STAR,
@@ -609,7 +617,7 @@ mod tests {
             url: None,
             order: mod_vocab::DependencyOrder::After,
         }]];
-        let libraries = declared_library_packages(&packages, &declared);
+        let libraries = declared_library_packages(&packages, &library_ids, &declared);
         assert!(libraries.contains("rapier3d"));
         assert!(!libraries.contains("horizon_sable"));
         assert!(!libraries.contains("unrelated"));

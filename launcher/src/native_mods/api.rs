@@ -220,6 +220,19 @@ impl std::fmt::Display for ProjectError {
 impl std::error::Error for ProjectError {}
 
 impl<'a> Project<'a> {
+    /// Whether this Cargo package is an explicitly declared native sibling library.
+    /// Libraries are still discovered as mod packages so their pins and trust checks
+    /// apply, but the registry route must not add Horizon's hook entry to them.
+    pub(super) fn is_native_library(&self) -> bool {
+        self.cargo
+            .get("package")
+            .and_then(|package| package.get("metadata"))
+            .and_then(|metadata| metadata.get("horizon"))
+            .and_then(|horizon| horizon.get("native_role"))
+            .and_then(toml::Value::as_str)
+            == Some("library")
+    }
+
     /// The mod's crate name: its `[lib] name`, or its package name with `_` for `-`.
     pub(super) fn crate_name(&self) -> String {
         self.cargo
@@ -627,6 +640,25 @@ mod tests {
         super::super::tests::write_bundle(&dir, "example", "");
         fs::write(dir.join("Cargo.toml"), "[package]\nname='example-mod'\nversion='9.0.0'\nedition='2024'\n[dependencies]\nhorizon-mod-api={path='.horizon/sdk/api/crates/horizon-mod-api'}\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn only_explicit_native_library_role_marks_a_package_as_library() {
+        let dir = fixture();
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname='example-mod'\nversion='9.0.0'\nedition='2024'\n[package.metadata.horizon]\nnative_role='library'\n[dependencies]\nhorizon-mod-api={path='.horizon/sdk/api/crates/horizon-mod-api'}\n",
+        )
+        .unwrap();
+        let bundle = super::super::bundle_in(&dir).unwrap().unwrap();
+        assert!(Project::read(&bundle).unwrap().is_native_library());
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname='example-mod'\nversion='9.0.0'\nedition='2024'\n[package.metadata.horizon]\nnative_role='mod'\n[dependencies]\nhorizon-mod-api={path='.horizon/sdk/api/crates/horizon-mod-api'}\n",
+        )
+        .unwrap();
+        let bundle = super::super::bundle_in(&dir).unwrap().unwrap();
+        assert!(!Project::read(&bundle).unwrap().is_native_library());
     }
 
     #[test]
