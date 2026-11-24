@@ -4,7 +4,11 @@ use crate::{
     i18n::{tr, trf},
 };
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 pub fn is_developer(version: &str) -> bool {
     version.starts_with("developer-")
@@ -59,6 +63,23 @@ pub(crate) fn revision_in(directory: &Path) -> Result<String, String> {
         return Err(tr("Invalid developer build revision.").into());
     }
     Ok(record.revision)
+}
+
+/// The committed source snapshot that belongs to an installed developer package.
+/// Refuse to pair it with a different selected SDK revision.
+pub(crate) fn source_archive(version: &str, expected_revision: &str) -> Result<PathBuf, String> {
+    let directory = backend::version_dir(version);
+    let revision = revision_in(&directory)?;
+    if revision != expected_revision {
+        return Err(
+            tr("The developer source snapshot does not match the selected SDK revision.").into(),
+        );
+    }
+    let archive = directory.join("developer-source.tar");
+    if !archive.is_file() {
+        return Err(tr("The installed developer package has no committed source snapshot.").into());
+    }
+    Ok(archive)
 }
 
 // Do not follow symlinks: only the regular files the packager produced are installable.
