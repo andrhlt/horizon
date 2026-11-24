@@ -1676,8 +1676,10 @@ impl Game<'_> {
         }
         if dim == self.dim {
             self.world.water_tickets.clear();
+            self.world.moving_structures.clear();
         } else if let Some(world) = self.levels.parked_world_mut_of(dim.id()) {
             world.water_tickets.clear();
+            world.moving_structures.clear();
         }
         self.attachment_indexes.remove(&dim);
         self.passages.retire_level(dim.key());

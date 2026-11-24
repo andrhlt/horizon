@@ -573,9 +573,9 @@ impl EntityMovementWorld for SceneCollisions<'_, '_> {
         self.world
             .moving_structures
             .iter()
-            .filter_map(|collider| match collider.world_bounds(&budget) {
+            .filter_map(|entry| match entry.collider.world_bounds(&budget) {
                 Ok(Some(carrier_bounds)) if carrier_bounds.intersects(bounds) => {
-                    Some(Ok(collider.clone()))
+                    Some(Ok(entry.collider.clone()))
                 }
                 Ok(_) => None,
                 Err(error) => Some(Err(io::Error::other(error))),
@@ -1145,7 +1145,9 @@ mod section_tests {
             .unwrap()
             .rotated(Vec3::new(0.0, 1.0, 0.0), std::f64::consts::FRAC_PI_2)
             .unwrap();
-        world.set_moving_structure(CarrierCollider::new(geometry, placement));
+        world
+            .register_moving_structure("test_collision", CarrierCollider::new(geometry, placement))
+            .unwrap();
         let mut scene = SceneCollisions {
             world: &world,
             binding: &binding,
@@ -1154,7 +1156,7 @@ mod section_tests {
         let found = scene
             .moving_structure_collisions(
                 EntityIdentity(1),
-                Aabb::new(Vec3::new(1.2, 64.0, 0.2), Vec3::new(1.8, 65.8, 0.8)),
+                Aabb::new(Vec3::new(0.0, 64.0, 0.2), Vec3::new(0.6, 65.8, 0.8)),
             )
             .unwrap();
         assert_eq!(found.len(), 1);
@@ -1165,6 +1167,15 @@ mod section_tests {
                 .unwrap()
                 .is_some()
         );
+        let moved = scene
+            .resolve(
+                Aabb::new(Vec3::new(0.0, 64.0, 0.2), Vec3::new(0.6, 65.8, 0.8)),
+                Vec3::new(2.0, 0.0, 0.0),
+                0.0,
+                false,
+            )
+            .unwrap();
+        assert!((moved.x - 0.4).abs() < 1.0e-6, "{moved:?}");
     }
 
     /// Boxes swept through air, past torches (no collision shape), a fence (a shape

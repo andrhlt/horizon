@@ -324,21 +324,29 @@ impl RigidTransform {
 #[derive(Clone, Debug)]
 pub struct CarrierCell {
     local: BlockPos,
-    shape: VoxelShape,
+    boxes: Vec<Aabb>,
 }
 impl CarrierCell {
     /// Assembles the cell. An empty shape is allowed and contributes no
     /// collision boxes.
     pub fn new(local: BlockPos, shape: VoxelShape) -> Self {
-        Self { local, shape }
+        Self {
+            local,
+            boxes: shape.boxes().to_vec(),
+        }
+    }
+    /// Assemble a cell from exact block-local collision boxes received across
+    /// the mod boundary. Empty and partial box sets remain empty and partial.
+    pub fn from_boxes(local: BlockPos, boxes: Vec<Aabb>) -> Self {
+        Self { local, boxes }
     }
     /// The integer local position.
     pub fn local(&self) -> BlockPos {
         self.local
     }
     /// The real voxel shape in cell-local coordinates.
-    pub fn shape(&self) -> &VoxelShape {
-        &self.shape
+    pub fn boxes(&self) -> &[Aabb] {
+        &self.boxes
     }
 }
 
@@ -816,11 +824,26 @@ impl CarrierCollider {
         self.geometry.uuid()
     }
 
+    /// Reuse immutable cell geometry at a new validated placement.
+    pub fn with_placement(&self, placement: RigidTransform) -> Self {
+        Self {
+            geometry: Arc::clone(&self.geometry),
+            placement,
+        }
+    }
+
     /// Conservative world-space bounds for broad-phase movement queries.
     pub fn world_bounds(&self, budget: &ContactBudget) -> Result<Option<Aabb>, Refused> {
-        self.geometry
+        let bounds = self
+            .geometry
             .oriented_boxes(&self.placement, budget.boxes)
-            .map(|(_, bounds)| bounds)
+            .map(|(_, bounds)| bounds)?;
+        if bounds.is_some_and(|bounds| {
+            !bounds.min_position().is_finite() || !bounds.max_position().is_finite()
+        }) {
+            return Err(Refused::NonFinite);
+        }
+        Ok(bounds)
     }
 
     /// Clips an axis-aligned entity box against the carrier's transformed
@@ -921,7 +944,7 @@ impl CarrierGeometry {
         let mut bounds: Option<Aabb> = None;
         for cell in &self.cells {
             let local_origin = Vec3::from_block(cell.local);
-            for box_bounds in cell.shape.boxes() {
+            for box_bounds in cell.boxes() {
                 if result.len() >= box_budget {
                     return Err(Refused::BoxBudget);
                 }
@@ -1206,7 +1229,12 @@ impl CarrierGeometry {
         let local_end = placement.to_local(end);
         let mut best: Option<(f64, BlockHit)> = None;
         for cell in &self.cells {
-            let Some(hit) = cell.shape.clip(local_start, local_end, cell.local) else {
+            let Some(hit) = VoxelShape::clip_boxes(
+                cell.boxes.iter().copied(),
+                local_start,
+                local_end,
+                cell.local,
+            ) else {
                 continue;
             };
             let distance = local_start.distance_squared(hit.location);

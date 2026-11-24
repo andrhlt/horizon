@@ -790,6 +790,38 @@ pub trait LevelsBackend {
 #[doc(hidden)]
 #[horizon_mod_api_macros::host_area]
 pub trait LevelsBackendMut {
+    /// Side: server. Register exact sparse cell collision boxes at an initial
+    /// placement. Cells and boxes are bounded and validated before publication;
+    /// a successful handle is owned by the calling mod and is removed on
+    /// explicit removal or level close. Geometry is shared across placement
+    /// updates. Returns None for malformed/over-budget geometry, a client,
+    /// stale level or a disabled owner.
+    #[access(WorldOnly)]
+    fn level_register_moving_structure(
+        &mut self,
+        level: LevelRef,
+        cells: Vec<MovingStructureCell>,
+        placement: MovingStructurePlacement,
+    ) -> Option<MovingStructureRef>;
+    /// Side: server. Update only the placement of this mod-owned collider;
+    /// its registered cell geometry remains shared. False for a stale or
+    /// foreign handle, client, disabled owner, or invalid transform.
+    #[access(WorldOnly)]
+    fn level_update_moving_structure(
+        &mut self,
+        level: LevelRef,
+        structure: MovingStructureRef,
+        placement: MovingStructurePlacement,
+    ) -> bool;
+    /// Side: server. Remove this mod-owned collider. False for a stale,
+    /// foreign or already removed handle, a client, or a disabled owner.
+    #[access(WorldOnly)]
+    fn level_remove_moving_structure(
+        &mut self,
+        level: LevelRef,
+        structure: MovingStructureRef,
+    ) -> bool;
+
     /// Side: server.
     /// Mark the half-open box `min <= pos < max` as watered (`FarmlandWaterManager.addAABBTicket`).
     /// For 5x1x5 farmland starting at [0, 64, 0], use min [0, 64, 0], max [5, 65, 5].

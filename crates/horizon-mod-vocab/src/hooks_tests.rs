@@ -738,6 +738,26 @@ fn world_data_and_tick_queries_take_their_hosts(
     }
 }
 
+/// Compile-only: exact loaded block-local boxes feed a server-owned moving
+/// collider, whose transform can be updated and whose handle can be removed.
+#[allow(dead_code)]
+fn moving_structure_collision_api_takes_server_host(
+    read: &dyn Host,
+    server: &mut dyn ServerHost,
+    level: LevelRef,
+    state: BlockState,
+) {
+    let boxes = level
+        .block_shape(read, state, [0, 64, 0], BlockShapeKind::Collision)
+        .unwrap_or_default();
+    let cell = MovingStructureCell::new([0, 0, 0], boxes);
+    let placement = MovingStructurePlacement::new([0.0, 64.0, 0.0], [0.0; 3], [1.0, 0.0, 0.0, 0.0]);
+    if let Some(structure) = level.register_moving_structure(server, vec![cell], placement) {
+        let _ = level.update_moving_structure(server, structure, placement);
+        let _ = level.remove_moving_structure(server, structure);
+    }
+}
+
 /// Compile-only: the level queries as a mod calls them, the reads on any host and the drop
 /// roll, which moves the level's random, on a server host.
 #[allow(dead_code)]

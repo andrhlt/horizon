@@ -49,6 +49,76 @@ pub struct IntGameRuleKey(pub(crate) u32);
 // exhaustive: only the registration table creates keys
 pub struct FluidKey(pub(crate) u32);
 
+/// One sparse moving-structure cell. `boxes` are the exact block-local
+/// collision boxes returned by `LevelRef::block_shape` with Collision.
+#[derive(Clone, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct MovingStructureCell {
+    /// Integer local coordinates relative to the carrier pivot.
+    pub position: [i32; 3],
+    /// Exact block-local `[min_x, min_y, min_z, max_x, max_y, max_z]` boxes.
+    pub boxes: Vec<[f64; 6]>,
+}
+
+impl MovingStructureCell {
+    /// Pair local cell coordinates with its collision boxes.
+    pub fn new(position: [i32; 3], boxes: Vec<[f64; 6]>) -> Self {
+        Self { position, boxes }
+    }
+}
+
+/// Translation, pivot and canonicalized-or-canonicalizable quaternion of a
+/// moving structure, in world block coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, horizon_mod_api_macros::Wire)]
+#[non_exhaustive]
+pub struct MovingStructurePlacement {
+    /// World-space translation.
+    pub translation: [f64; 3],
+    /// Local pivot, in carrier coordinates.
+    pub pivot: [f64; 3],
+    /// Rotation quaternion in `(w, x, y, z)` order.
+    pub rotation: [f64; 4],
+}
+
+impl MovingStructurePlacement {
+    /// Construct a transform. Non-finite values and a zero quaternion are
+    /// refused when the level registers or updates the placement.
+    pub fn new(translation: [f64; 3], pivot: [f64; 3], rotation: [f64; 4]) -> Self {
+        Self {
+            translation,
+            pivot,
+            rotation,
+        }
+    }
+}
+
+/// Session-only handle to one mod-owned moving-structure collider.
+/// Explicit removal and level close invalidate it; it is never saved.
+#[derive(horizon_mod_api_macros::Wire)]
+#[wire(internal_field_layouts)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MovingStructureRef {
+    pub(crate) level: LevelRef,
+    pub(crate) id: u64,
+}
+
+impl MovingStructureRef {
+    /// Construct a handle at the game boundary.
+    #[doc(hidden)]
+    pub fn new(level: LevelRef, id: u64) -> Self {
+        Self { level, id }
+    }
+    /// The level this collider belongs to.
+    pub fn level(self) -> LevelRef {
+        self.level
+    }
+    /// Its session-only identity.
+    #[doc(hidden)]
+    pub fn id(self) -> u64 {
+        self.id
+    }
+}
+
 /// Sampling parameters for `LevelRef::find_closest_biome`, in blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]

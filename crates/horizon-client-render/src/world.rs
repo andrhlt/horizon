@@ -121,7 +121,8 @@ pub struct World {
     /// Live moving-structure collision snapshots consumed by ordinary entity
     /// movement. The game updates these as carriers move and removes them on
     /// disassembly; snapshots share their immutable sparse block geometry.
-    pub moving_structures: Vec<horizon_world::carrier::contact::CarrierCollider>,
+    pub moving_structures: Vec<LiveMovingStructure>,
+    next_moving_structure_id: u64,
     /// Whether the world's `data/` folder already existed when the
     /// world opened — the carrier store's first-use gate. Captured at
     /// open, not at transfer time, so a folder created this session
@@ -272,29 +273,75 @@ impl Weather {
         }
     }
 }
+/// One mod-owned live collider registration. Placement updates share the
+/// immutable sparse geometry, and disabling the owner retires its collider.
+#[derive(Clone, Debug)]
+pub struct LiveMovingStructure {
+    pub id: u64,
+    pub owner: &'static str,
+    pub collider: horizon_world::carrier::contact::CarrierCollider,
+}
+
 impl World {
-    /// Insert or replace a live carrier's immutable collision geometry and
-    /// current placement. The gameplay carrier controller owns when this is
-    /// called and must remove the collider when the carrier is disassembled.
-    pub fn set_moving_structure(
+    /// Register exact collision boxes and their initial placement.
+    pub fn register_moving_structure(
         &mut self,
+        owner: &'static str,
         collider: horizon_world::carrier::contact::CarrierCollider,
-    ) {
-        if let Some(existing) = self
+    ) -> Option<u64> {
+        if self.moving_structures.len() >= 256
+            || collider
+                .world_bounds(&horizon_world::carrier::contact::ContactBudget::default())
+                .is_err()
+        {
+            return None;
+        }
+        let id = self.next_moving_structure_id.checked_add(1)?;
+        self.next_moving_structure_id = id;
+        self.moving_structures.push(LiveMovingStructure {
+            id,
+            owner,
+            collider,
+        });
+        Some(id)
+    }
+
+    /// Update only placement, preserving the shared sparse cell geometry.
+    pub fn update_moving_structure(
+        &mut self,
+        owner: &str,
+        id: u64,
+        placement: horizon_world::carrier::contact::RigidTransform,
+    ) -> bool {
+        let Some(entry) = self
             .moving_structures
             .iter_mut()
-            .find(|existing| existing.uuid() == collider.uuid())
+            .find(|entry| entry.id == id && entry.owner == owner)
+        else {
+            return false;
+        };
+        let updated = entry.collider.with_placement(placement);
+        if updated
+            .world_bounds(&horizon_world::carrier::contact::ContactBudget::default())
+            .is_err()
         {
-            *existing = collider;
-        } else {
-            self.moving_structures.push(collider);
+            return false;
         }
+        entry.collider = updated;
+        true
     }
 
     /// Remove a live carrier collision snapshot by its stable identifier.
-    pub fn remove_moving_structure(&mut self, uuid: u128) {
+    pub fn remove_moving_structure(&mut self, owner: &str, id: u64) -> bool {
+        let old_len = self.moving_structures.len();
         self.moving_structures
-            .retain(|collider| collider.uuid() != uuid);
+            .retain(|entry| entry.id != id || entry.owner != owner);
+        old_len != self.moving_structures.len()
+    }
+
+    /// Retire every collider owned by a disabled code mod.
+    pub fn remove_moving_structures_by_owner(&mut self, owner: &str) {
+        self.moving_structures.retain(|entry| entry.owner != owner);
     }
 
     /// Install loaded instances, retiring an existing column's block entities even
@@ -359,6 +406,7 @@ impl World {
             block_entities: Default::default(),
             carrier_fences: Default::default(),
             moving_structures: Vec::new(),
+            next_moving_structure_id: 0,
             carrier_data_existed_at_open: false,
             chest_openers: FxHashMap::default(),
             block_names: FxHashMap::default(),

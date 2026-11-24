@@ -5,19 +5,38 @@
 use super::Game;
 use horizon_client::{streaming::Streaming, world::World};
 use horizon_core::{
-    geometry::Direction,
+    geometry::{Aabb, Direction, Vec3 as CoreVec3},
     position::{BlockPos, ChunkPos},
 };
 use horizon_items::items::ItemStack;
+use horizon_world::carrier::contact::{
+    CarrierCell, CarrierCollider, CarrierGeometry, RigidTransform, Rotation,
+};
 use horizon_world::registry::BlockStateId;
 use mod_api::world::mod_chunk_tickets::ModTicket;
 use mod_api::{
     BlockHit, BlockTransformPreview, ChunkRef, ChunkStatus, ClipBlock, ClipFluid, DimensionKey,
     Hand, LevelRef, LightLayer, MapState, PlayerRef, RespawnData, TicketController, Vec3,
 };
+use std::sync::Arc;
 
 fn block_pos([x, y, z]: [i32; 3]) -> BlockPos {
     BlockPos::new(x, y, z)
+}
+
+fn moving_structure_transform(
+    placement: mod_api::MovingStructurePlacement,
+) -> Result<RigidTransform, horizon_world::carrier::contact::Refused> {
+    let [w, x, y, z] = placement.rotation;
+    RigidTransform::new(
+        CoreVec3::new(
+            placement.translation[0],
+            placement.translation[1],
+            placement.translation[2],
+        ),
+        CoreVec3::new(placement.pivot[0], placement.pivot[1], placement.pivot[2]),
+        Rotation::from_components(w, x, y, z)?,
+    )
 }
 
 /// Whether chunk `pos` lies inside the world (`/forceload`'s 30 million block bound).
@@ -71,6 +90,128 @@ fn biome_search_within_budget(parameters: mod_api::BiomeSearch, height: i32) -> 
 }
 
 impl Game<'_> {
+    pub(super) fn level_register_moving_structure(
+        &mut self,
+        level: LevelRef,
+        cells: Vec<mod_api::MovingStructureCell>,
+        placement: mod_api::MovingStructurePlacement,
+    ) -> Option<mod_api::MovingStructureRef> {
+        let owner = mod_api::content::crash::current_native_mod()?;
+        let owner_index = mod_api::__private::mod_index(owner)?;
+        if !self.is_logical_server() || !mod_api::__private::mod_index_on(owner_index) {
+            return None;
+        }
+        self.native_level_world(level)?;
+        if cells.len() > 4096 {
+            return None;
+        }
+        let mut box_count = 0usize;
+        let mut geometry_cells = Vec::with_capacity(cells.len());
+        for cell in cells {
+            if cell
+                .position
+                .iter()
+                .any(|axis| !(-128..=127).contains(axis))
+            {
+                return None;
+            }
+            box_count = box_count.checked_add(cell.boxes.len())?;
+            if box_count > 4096 {
+                return None;
+            }
+            let mut boxes = Vec::with_capacity(cell.boxes.len());
+            for [min_x, min_y, min_z, max_x, max_y, max_z] in cell.boxes {
+                if ![min_x, min_y, min_z, max_x, max_y, max_z]
+                    .into_iter()
+                    .all(f64::is_finite)
+                    || min_x >= max_x
+                    || min_y >= max_y
+                    || min_z >= max_z
+                {
+                    return None;
+                }
+                boxes.push(Aabb::new(
+                    CoreVec3::new(min_x, min_y, min_z),
+                    CoreVec3::new(max_x, max_y, max_z),
+                ));
+            }
+            geometry_cells.push(CarrierCell::from_boxes(
+                BlockPos::new(cell.position[0], cell.position[1], cell.position[2]),
+                boxes,
+            ));
+        }
+        let geometry = Arc::new(CarrierGeometry::new(0, geometry_cells).ok()?);
+        let placement = moving_structure_transform(placement).ok()?;
+        let collider = CarrierCollider::new(geometry, placement);
+        let world = if level.dimension() == self.dim.key() {
+            &mut self.world
+        } else {
+            self.levels.parked_world_mut_of(level.dimension_id())?
+        };
+        let id = world.register_moving_structure(owner, collider)?;
+        Some(mod_api::MovingStructureRef::new(level, id))
+    }
+
+    pub(super) fn level_update_moving_structure(
+        &mut self,
+        level: LevelRef,
+        structure: mod_api::MovingStructureRef,
+        placement: mod_api::MovingStructurePlacement,
+    ) -> bool {
+        let Some(owner) = mod_api::content::crash::current_native_mod() else {
+            return false;
+        };
+        let Some(owner_index) = mod_api::__private::mod_index(owner) else {
+            return false;
+        };
+        if !self.is_logical_server()
+            || !mod_api::__private::mod_index_on(owner_index)
+            || structure.level() != level
+            || self.native_level_world(level).is_none()
+        {
+            return false;
+        }
+        let Ok(placement) = moving_structure_transform(placement) else {
+            return false;
+        };
+        let world = if level.dimension() == self.dim.key() {
+            &mut self.world
+        } else if let Some(world) = self.levels.parked_world_mut_of(level.dimension_id()) {
+            world
+        } else {
+            return false;
+        };
+        world.update_moving_structure(owner, structure.id(), placement)
+    }
+
+    pub(super) fn level_remove_moving_structure(
+        &mut self,
+        level: LevelRef,
+        structure: mod_api::MovingStructureRef,
+    ) -> bool {
+        let Some(owner) = mod_api::content::crash::current_native_mod() else {
+            return false;
+        };
+        let Some(owner_index) = mod_api::__private::mod_index(owner) else {
+            return false;
+        };
+        if !self.is_logical_server()
+            || !mod_api::__private::mod_index_on(owner_index)
+            || structure.level() != level
+            || self.native_level_world(level).is_none()
+        {
+            return false;
+        }
+        let world = if level.dimension() == self.dim.key() {
+            &mut self.world
+        } else if let Some(world) = self.levels.parked_world_mut_of(level.dimension_id()) {
+            world
+        } else {
+            return false;
+        };
+        world.remove_moving_structure(owner, structure.id())
+    }
+
     pub(super) fn level_add_water_ticket(
         &mut self,
         level: LevelRef,
@@ -3239,7 +3380,10 @@ mod environment_read_tests {
             let in_piece = start.pieces[0].bounding_box().min;
             let in_box = start.bounding_box.min;
             assert!(
-                !start.pieces.iter().any(|p| p.bounding_box().is_inside(in_box)),
+                !start
+                    .pieces
+                    .iter()
+                    .any(|p| p.bounding_box().is_inside(in_box)),
                 "the box's corner is outside every piece"
             );
             let refer = |game: &mut crate::game::Game<'_>, pos: [i32; 3]| {

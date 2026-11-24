@@ -1742,11 +1742,19 @@ impl Game<'_> {
         }
     }
     /// Apply the player's switches at the canonical native and wasm dispatch boundary.
-    pub(super) fn sync_native_switches(&self) {
+    pub(super) fn sync_native_switches(&mut self) {
         self.instance_groups
             .borrow_mut()
             .retire_disabled(&self.settings.mods.disabled);
         self.mods.apply_code_switches(&self.settings.mods.disabled);
+        for owner in &self.settings.mods.disabled {
+            self.world.remove_moving_structures_by_owner(owner);
+            for dim in self.levels.parked_dims() {
+                if let Some(level) = self.levels.parked_mut(dim) {
+                    level.world.remove_moving_structures_by_owner(owner);
+                }
+            }
+        }
     }
 }
 
