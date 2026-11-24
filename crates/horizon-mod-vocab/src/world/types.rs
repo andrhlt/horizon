@@ -652,7 +652,7 @@ pub enum ExplosionDestroyError {
     TooMany(u64),
     /// A stale level, or one not in place; a stale source or one in another level; a client.
     Unavailable,
-    /// A centre or radius that isn't finite, or a negative radius.
+    /// A centre or radius that isn't finite, a negative radius, or a radius over 64.
     InvalidBlast,
     /// A host without a game.
     NoGame,
@@ -1609,6 +1609,24 @@ impl StructureAt {
             in_box,
             in_piece,
         }
+    }
+}
+
+/// A loaded block entity from `LevelRef::block_entities`: its block's position and its type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[derive(horizon_mod_api_macros::Wire)]
+pub struct BlockEntityAt {
+    /// The position of its block.
+    pub pos: [i32; 3],
+    /// Registry id of its type (`BlockEntity.getType`): `minecraft:chest`.
+    pub id: String,
+}
+
+impl BlockEntityAt {
+    /// A block entity at `pos` of type `id`.
+    pub fn new(pos: [i32; 3], id: String) -> Self {
+        Self { pos, id }
     }
 }
 

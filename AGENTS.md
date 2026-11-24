@@ -1,3 +1,65 @@
+## Current priority: practical playability
+
+The current acceptance target is a reliable private family-and-friends play
+session. For this mod-port and compatibility-fork work, this section supersedes
+older instructions that require exhaustive Java parity or lengthy evidence
+before delivery. It does not change the upstream project's long-term parity goal.
+
+### Completion threshold
+
+- Build and load the intended package successfully.
+- Exercise a short normal-player scenario covering each feature family's main
+  implemented mechanics. For animals, cover applicable movement, interactions,
+  feeding/taming/breeding/capture. For machinery, cover placement, power, work,
+  stopping and recovery. Do not substitute registration or helper tests for use.
+- Check representative save/reopen persistence of ownership, inventories,
+  settings and meaningful progress.
+- Check representative offline host/guest behavior when ownership, interaction
+  or synchronization depends on multiple players. Use distinct authoritative
+  player identities, not two aliases for one UUID. No Microsoft sign-ins or
+  device-code flows are required for this verification target.
+- Fix reproducible crashes, duplication, item/entity loss, save corruption and
+  broken main gameplay mechanics. Missing ordinary functionality stays open;
+  do not hide it as a cosmetic follow-up or claim the full feature works.
+
+Exact tick/packet timing, RNG sequences, exhaustive variant combinations, pixel
+comparisons, minor animation, interpolation and shadow differences are follow-up
+work unless they materially affect gameplay. They do not block this baseline.
+Do not describe a representative gameplay pass as exhaustive 1:1 parity.
+
+### Efficient verification and delivery
+
+- Use the same identified source/build artifact for a check. Record the commit,
+  artifact identity, short command/result and actual remaining bugs. Reuse valid
+  unchanged evidence; avoid repeated broad audits, verbose reports or new test
+  frameworks. Run fast checks first and rebuild only for relevant source changes.
+- Feature owners implement and fix their features through acceptance; a patch
+  submission or failed test report is not completion. Repair recoverable fixture,
+  build and setup problems. Park only a concrete external dependency with a
+  precise next action, while continuing useful independent work.
+- Naturalist pods batch contributor commits into one immutable build per pod
+  iteration, then return it to each owner for their own isolated tests. Pods may
+  build concurrently. Create workers independently own their builds and tests;
+  they do not wait for a pod or central build queue. Isolate writable caches,
+  launcher/game homes, worlds and control sockets; reuse verified immutable
+  inputs where supported. Never delete another worker's locks or stop its jobs.
+- All automated gameplay, server and guest checks are headless. Actual frame
+  checks use a supported genuinely offscreen mode without visible windows,
+  focus changes, system pointer capture/warping or desktop input. Use supported
+  offline/developer test paths; do not bypass authentication or managed leases.
+- Preserve the agreed engine/SDK pin, source/artifact compatibility, other
+  workers' changes, worlds and evidence. A fork cohort must be explicitly
+  identified; do not silently upgrade the engine or mix incompatible SDKs.
+- Deliver a focused reviewed PR once the practical baseline passes. Honor pod
+  delivery grouping. Resolve required checks/review, merge through normal repo
+  rules, then close the covered baseline issues and report any release limits.
+  Do not waive a known serious defect to close a ticket. Exact parity follow-ups
+  can remain open without blocking a correctly scoped baseline delivery.
+- Before deployment, run one combined smoke session with the selected mods:
+  representative gameplay, an early Create production chain where included,
+  save/reopen and an offline guest reconnect. A component pass alone does not
+  establish the complete deployment works.
+
 # Horizon: a map for agents
 
 Minecraft: Java Edition 26.3 rewritten in Rust (wgpu). Vanilla is the specification wherever it has the
@@ -209,7 +271,7 @@ state stays separate from the library tests. This compiles gameplay twice for ex
 |---|---|
 | Game loop, tick, frame | `game.rs`: `fn run`, `fn tick`, `fn tick_world`, `fn render`; G: `runtime/window_handler.rs` (`impl ApplicationHandler for Game`: `window_event`, `about_to_wait`), `runtime/launch_options.rs` (the command line); L: `clock.rs`, `spans.rs`; `horizon-client-input/src/window.rs` |
 | Rendering | L: `gfx.rs` (`Renderer::new`, `Renderer::render`), `gfx/` (cull, occlusion, translucency, upload, timing, lod, weather, stars, end_sky), `*.wgsl`, `particles.rs`, `block_entity_render.rs`, `item_render.rs`, `fog.rs`, `clouds.rs`, `camera.rs`, `first_person.rs`; G: `interface/render_tick.rs`, `interface/frame_geometry.rs` (cracks, sun and moon, first-person hand, rain and snow), `interface/item_draw.rs`, `interface/screen_backgrounds.rs` (panorama, menu blur, border wall) |
-| Chunks, streaming, light | L: `streaming.rs` (worker pool: generate, light, mesh), `world.rs`, `chunk.rs`, `chunk_map.rs`, `light.rs`, `mesher.rs` + `mesher/`, `vanillagen.rs` (binds horizon-world's generator), `lod.rs` + `lod/`, `server_terrain.rs` (a server's kept chunks), `bluemap.rs` + `bluemap_detect.rs` (far terrain from its web map), `ticket_levels.rs`; G: `world/world_loading.rs`, `world/world_entry.rs`, `world/postprocess.rs`, `world/world_update.rs` (`fn update_world`, far terrain) |
+| Chunks, streaming, light | L: `streaming.rs` (worker pool: generate, light, mesh), `world.rs`, `chunk.rs`, `chunk_map.rs`, `light.rs`, `mesher.rs` + `mesher/`, `vanillagen.rs` (binds horizon-world's generator), `lod.rs` + `lod/`, `server_terrain.rs` (a server's kept chunks), `ticket_levels.rs`; G: `world/world_loading.rs`, `world/world_entry.rs`, `world/postprocess.rs`, `world/world_update.rs` (`fn update_world`, far terrain) |
 | World generation | `crates/horizon-world/src/worldgen/` (`generator*.rs`, `feature_graph.rs`, `structure/`, `carver/`) |
 | Block behaviour | `crates/horizon-world/src/level/` (`mod.rs`, `tick.rs`, `hooks.rs`, `redstone.rs`, `place.rs`, `interact.rs`); G: `blocks/block_ticks.rs` (`fn tick_blocks`); game.rs `fn process_level_events` |
 | Mobs | L: `mobs.rs` (types), `mobs/` (`ai.rs`, `goals.rs`, `brain.rs`, `*_brain.rs`, `nav.rs`, `path.rs`, `species.rs`, `spawning.rs`, `render.rs`, `anim.rs`); G: `creatures.rs` (ticking, spawning, mob events), one file per mob family (`mobs/dragon.rs`, `mobs/wither.rs`, `mobs/villagers.rs`, `mobs/piglins.rs`, `mobs/golems.rs`...), `mobs/natural_spawning.rs` |
@@ -218,7 +280,7 @@ state stays separate from the library tests. This compiles gameplay twice for ex
 | Inventory and containers | L: `menu.rs` (`AbstractContainerMenu.clicked`), `container_screen.rs`, `containers.rs`, `creative.rs`, `crafting.rs`, `recipe_book*.rs`, `stations.rs`, `merchant.rs`; G: `interface/menu_clicks.rs` (`fn menu_ops`, `fn click_inventory`), `blocks/stations.rs`, `items/trading.rs`, `items/recipe_book.rs`, `machines.rs`, `interface/inventory_input.rs` (keys and clicks over a container), `interface/inventory_slots.rs` (slot layout and drawing) |
 | Commands | parse: crate `horizon-command` (`args.rs`, `selector.rs`, `tree_*.rs`, `vanilla.rs`); run: G: `commands.rs` (dispatch) + `commands/*.rs` (`admin`, `execute`, `items`, `players`, `world_cmds`...); L: `scoreboard_cmd.rs`, `data_cmd.rs`; `horizon-client-core`: `nbt_path.rs`, `scoreboard.rs`; G: `administration/functions.rs`, `administration/command_blocks.rs` |
 | UI screens | `Screen` enum in game.rs; L: `title.rs` + `title/`, `options_ui.rs`, `multiplayer.rs`, `pack_screen.rs`, `settings_shell.rs` (Horizon's settings screens on it: `extras_ui.rs`, `graphics_ui.rs`, `controller_ui.rs`, `shader_ui.rs`; a page list too long for its column collapses into one row), `screen_draw.rs`, `ui.rs` (widgets), `hud.rs`, `hud_layout.rs`, `hud_overlays.rs`, `hud_kit/` (Horizon overlays' `Room` and `Plate`, the collapsed page strip `tabs` the shell's page list uses, [docs/ui-kit.md](docs/ui-kit.md)), `pad_glyph.rs` (controller glyphs, by what the button does), `chat.rs`, `tab_list.rs`; G: `interface/startup_menu.rs`, `runtime/loading_screen.rs` (the loading screen, the pre-game `App`), `runtime/resource_loader.rs` (what a start loads, `run_loading`), `interface/screens.rs` (pause, death), `interface/options.rs`, `network/lan_screen.rs`, `interface/chat.rs`, `interface/sign_edit.rs`, `interface/books.rs`, `interface/creative_screen.rs` |
-| Multiplayer client | L: `net.rs` (network thread); G: `network/remote/mod.rs` (`fn handle_packet`, `fn tick_remote`), `network/remote/` (mob data, objects, projectiles, vehicles, stations) |
+| Multiplayer client | L: `net.rs` (network thread); G: `network/remote/mod.rs` (each `Game` method's mod point, forwarding to `<name>_body` in its feature file), `network/remote/apply_packet.rs` (`fn apply_packet_body`), `network/remote/tick.rs` (`fn tick_remote_body`), `network/remote/` (mob data, objects, projectiles, vehicles, stations) |
 | LAN host / server side | L: `lan/` (`conn.rs` handshake + login threads, `hub.rs` + `hub/` play state, `chunks.rs`, `entity.rs`, `tracking.rs`, `guest.rs`, `playerdata.rs`); G: `lan.rs` (`LanHost`), `lan_actions.rs` (`fn as_guest`, `fn tick_guests`), `lan_*.rs` per feature, `network/lan_entities.rs` (tracked entities) |
 | Integrated server | G: `world/integrated.rs` (the server thread), `world/levels.rs` (one level per dimension, `fn tick_server`), `world/server_travel.rs` |
 | Dedicated server | G: `dedicated.rs`, `dedicated/status.rs`; crates `horizon-server-files`, `horizon-server`, `horizon-anticheat` (L: `lan/anticheat.rs`) |
