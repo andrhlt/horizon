@@ -1304,6 +1304,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::native_mods::NATIVE_MANIFEST;
 
     #[test]
     fn the_route_is_chosen_once_from_the_whole_set() {
