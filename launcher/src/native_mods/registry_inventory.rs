@@ -150,6 +150,15 @@ impl Metadata {
                 .filter(|_| runtime.contains(package.id.as_str()))
             {
                 if let Some(existing) = links.iter().find(|claim| &claim.library == library) {
+                    // The SDK already owns this exact package identity.  Its lock and the
+                    // resolved mod lock have been checked before inventory runs, so this is the
+                    // same provider, not a second native implementation.  A different version
+                    // or package remains a second provider and is refused below.
+                    if game.packages.keys().any(|id| {
+                        id.name == package.name && id.version.to_string() == package.version
+                    }) {
+                        continue;
+                    }
                     return Err(format!("Native library {library}: mod package {} {} would compile a second provider of SDK package {} {}; the prebuilt game cannot be relinked with a different provider", package.name, package.version, existing.name, existing.version));
                 }
             }
@@ -264,5 +273,26 @@ mod tests {
         for detail in ["native-sys", "2.0.0", "sdk-sys", "1.0.0", "example"] {
             assert!(error.contains(detail), "{error}");
         }
+    }
+
+    #[test]
+    fn an_exact_game_locked_native_provider_is_reused() {
+        let game = super::super::registry_lock::RegistryLock::parse(
+            "version=4\n[[package]]\nname='native-sys'\nversion='2.0.0'\nsource='registry+https://github.com/rust-lang/crates.io-index'\nchecksum='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'\n",
+        )
+        .unwrap();
+        let inventory = metadata()
+            .inventory(
+                &game,
+                &[NativeLink {
+                    name: "sdk-sys".into(),
+                    version: "2.0.0".into(),
+                    library: "example".into(),
+                }],
+            )
+            .unwrap();
+        assert_eq!(inventory.added_crates, 1);
+        assert!(inventory.build_scripts.is_empty());
+        assert_eq!(inventory.proc_macros, ["derive-example 1.0.0"]);
     }
 }
