@@ -118,7 +118,7 @@ pub(super) fn copy_runtime(bundle: &Bundle, to: &Path) -> Result<(), String> {
         .get_mut("dependencies")
         .and_then(toml::Value::as_table_mut)
     {
-        for dependency in dependencies.values_mut() {
+        for (_, dependency) in dependencies.iter_mut() {
             if let Some(details) = dependency.as_table_mut() {
                 details.remove("features");
                 details.remove("library");
