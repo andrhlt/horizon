@@ -330,6 +330,15 @@ impl Game<'_> {
         );
         Some(
             self.entity_ids_off_walk()
+                .chain({
+                    let mut ids = Vec::new();
+                    for_each_entity!(entity_lists_of!(self), entity => {
+                        if !entity.is_removed() {
+                            ids.push(entity.id());
+                        }
+                    });
+                    ids.into_iter()
+                })
                 .filter_map(|id| {
                     let entity = EntityRef::new(level.epoch(), id);
                     self.native_entity_target(entity)?;
@@ -2919,13 +2928,13 @@ pub(super) mod tests {
         with_game(|game| {
             let level = game.level(game.dim.id()).unwrap();
             assert!(game.run_command(
-                "summon marker 0.5 64.0 0.5 {UUID:[I;77,0,0,1]}"
+                "summon armor_stand 0.5 64.0 0.5 {Marker:1b,UUID:[I;77,0,0,1]}"
             ));
             let special = game
                 .level_special_entities_in(level, [0.0, 63.0, 0.0], [1.0, 65.0, 1.0])
                 .unwrap();
             assert_eq!(special.len(), 1);
-            assert_eq!(special[0], game.entity(game.others[0].id).unwrap());
+            assert_eq!(special[0], game.entity(game.armor_stands[0].id).unwrap());
             assert_eq!(game.entity_position(special[0]), Some([0.5, 64.0, 0.5]));
             assert!(game.level_entities_in(level, [0.0, 63.0, 0.0], [1.0, 65.0, 1.0]).unwrap().is_empty());
         });
