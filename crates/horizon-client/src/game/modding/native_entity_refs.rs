@@ -307,6 +307,58 @@ impl Game<'_> {
                 .collect(),
         )
     }
+
+    /// Special server entities that live outside `entity_lists!`, bounded by
+    /// their authoritative boxes. The ordinary query intentionally keeps its
+    /// existing kind and ordering contract.
+    pub(super) fn level_special_entities_in(
+        &self,
+        level: LevelRef,
+        min: [f64; 3],
+        max: [f64; 3],
+    ) -> Option<Vec<EntityRef>> {
+        if !self.is_logical_server()
+            || !self.level_handle_current(level)
+            || level.dimension() != self.dim.key()
+            || !min.iter().chain(&max).all(|value| value.is_finite())
+        {
+            return None;
+        }
+        let bounds = Aabb::new(
+            Vec3::new(min[0], min[1], min[2]),
+            Vec3::new(max[0], max[1], max[2]),
+        );
+        Some(
+            self.entity_ids_off_walk()
+                .chain({
+                    let mut ids = Vec::new();
+                    for_each_entity!(entity_lists_of!(self), entity => {
+                        if !entity.is_removed() {
+                            ids.push(entity.id());
+                        }
+                    });
+                    ids.into_iter()
+                })
+                .filter_map(|id| {
+                    let entity = EntityRef::new(level.epoch(), id);
+                    self.native_entity_target(entity)?;
+                    let [lo, hi] = self.entity_bounding_box(entity)?;
+                    let box_bounds = Aabb::new(
+                        Vec3::new(lo[0], lo[1], lo[2]),
+                        Vec3::new(hi[0], hi[1], hi[2]),
+                    );
+                    // Marker entities intentionally have a zero-volume box. AABB
+                    // intersection excludes that point, but bounded special-entity
+                    // lookup must still find a marker whose position is in range.
+                    let point = lo == hi
+                        && lo.iter().zip(min.iter().zip(max.iter())).all(
+                            |(value, (lower, upper))| *lower <= *value && *value <= *upper,
+                        );
+                    (point || bounds.intersects(box_bounds)).then_some(entity)
+                })
+                .collect(),
+        )
+    }
     /// The entity lists' entities whose boxes meet `bounds`, in list order.
     fn listed_entities_in(&self, bounds: Aabb) -> Vec<u32> {
         let mut ids = Vec::new();
@@ -2867,6 +2919,24 @@ pub(super) mod tests {
                 )
                 .is_none()
             );
+        });
+    }
+
+    #[test]
+    #[ignore = "daily"]
+    fn special_entities_in_includes_marker_without_changing_entities_in() {
+        with_game(|game| {
+            let level = game.level(game.dim.id()).unwrap();
+            assert!(game.run_command(
+                "summon armor_stand 0.5 64.0 0.5 {Marker:1b,UUID:[I;77,0,0,1]}"
+            ));
+            let special = game
+                .level_special_entities_in(level, [0.0, 63.0, 0.0], [1.0, 65.0, 1.0])
+                .unwrap();
+            assert_eq!(special.len(), 1);
+            assert_eq!(special[0], game.entity(game.armor_stands[0].id).unwrap());
+            assert_eq!(game.entity_position(special[0]), Some([0.5, 64.0, 0.5]));
+            assert!(game.level_entities_in(level, [0.0, 63.0, 0.0], [1.0, 65.0, 1.0]).unwrap().is_empty());
         });
     }
 

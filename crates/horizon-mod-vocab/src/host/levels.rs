@@ -297,6 +297,19 @@ pub trait LevelsBackend {
         max: [f64; 3],
     ) -> Option<Vec<EntityRef>>;
     /// Side: server.
+    /// The special entities kept outside the ordinary entity-list walk whose
+    /// bounding boxes intersect this box. This is the bounded read-only route
+    /// for markers, interactions, displays, frames and paintings; ordinary
+    /// `entities_in` remains unchanged. Returns None for a stale or parked
+    /// level, a client, or non-finite bounds.
+    #[access(WorldOnly)]
+    fn level_special_entities_in(
+        &self,
+        level: LevelRef,
+        min: [f64; 3],
+        max: [f64; 3],
+    ) -> Option<Vec<EntityRef>>;
+    /// Side: server.
     /// `ServerLevel.players`: the online players in this level, parked or in
     /// place, each once under their own UUID, also during a guest's turn. Fake
     /// players are not listed, as vanilla's list leaves out connectionless

@@ -70,6 +70,11 @@ impl PlayerSelection {
         self.players.iter().find(|player| player.entity_id == id)
     }
 
+    /// Find a real player in this tick's level by UUID.
+    pub fn by_uuid(&self, uuid: [i32; 4]) -> Option<&TickPlayer> {
+        self.players.iter().find(|player| player.view.uuid == uuid)
+    }
+
     /// Find a player riding this mob, independently of the combat target.
     pub fn rider(&self, mob_id: u32) -> Option<&TickPlayer> {
         self.players
@@ -141,5 +146,15 @@ mod tests {
         assert!(no_player.selected().is_none());
         assert!(no_player.select(1));
         assert!(no_player.has_switched());
+    }
+
+    #[test]
+    fn finds_real_players_by_uuid_without_following_selection() {
+        let mut owner = player(1, Some(42));
+        owner.view.uuid = [7, 0, 0, 9];
+        let players = PlayerSelection::new(vec![player(2, None), owner], Some(2)).unwrap();
+        assert_eq!(players.by_uuid([7, 0, 0, 9]).unwrap().entity_id, 1);
+        assert!(players.by_uuid([8, 0, 0, 9]).is_none());
+        assert_eq!(players.selected().unwrap().entity_id, 2);
     }
 }
