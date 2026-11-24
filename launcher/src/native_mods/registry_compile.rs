@@ -223,7 +223,7 @@ pub(super) fn compile(
             }
             fs::write(path, manifest.to_string()).map_err(|e| e.to_string())?;
         }
-        let mut externs = BTreeMap::new();
+        let mut externs: BTreeMap<String, PathBuf> = BTreeMap::new();
         if !is_library {
             externs = BTreeMap::from([
                 ("mod_api".into(), prebuilt::library(&deps, "mod_api")?),
