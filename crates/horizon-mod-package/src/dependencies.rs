@@ -116,6 +116,8 @@ pub struct Dependency {
     pub id: String,
     pub requirement: VersionReq,
     pub optional: bool,
+    pub library: bool,
+    pub features: Vec<String>,
     pub side: Side,
     pub reason: Option<String>,
     pub url: Option<String>,
@@ -137,6 +139,8 @@ pub fn from_manifest(
                 id: id.clone(),
                 requirement: details.version,
                 optional: details.optional,
+                library: details.library,
+                features: details.features,
                 side: details.side,
                 reason: details.reason,
                 url: details.url,
@@ -580,6 +584,19 @@ pub fn rewrite(
             let mut entry = toml::Table::new();
             entry.insert("path".into(), format!("../{id}").into());
             entry.insert("package".into(), package.into());
+            if !target.dependency.features.is_empty() {
+                entry.insert(
+                    "features".into(),
+                    target
+                        .dependency
+                        .features
+                        .iter()
+                        .cloned()
+                        .map(toml::Value::String)
+                        .collect::<Vec<_>>()
+                        .into(),
+                );
+            }
             if target.dependency.optional {
                 entry.insert("optional".into(), true.into());
             }
@@ -1123,6 +1140,49 @@ mod tests {
         );
         assert!(absent["features"]["extra"].as_array().unwrap().is_empty());
         assert!(absent["dependencies"].get("extra").is_none());
+    }
+
+    #[test]
+    fn forwards_features_for_required_staged_dependencies() {
+        let deps = deps(
+            "[dependencies]\nrapier3d = { version = '=0.32.0', features = ['dim3', 'f32', 'std', 'simd-stable', 'parallel'] }",
+        );
+        let mut manifest = toml::Table::new();
+        rewrite(
+            "sable",
+            &mut manifest,
+            &[Package {
+                dependency: &deps[0],
+                package: Some("rapier3d"),
+            }],
+        )
+        .unwrap();
+
+        let features = manifest["dependencies"]["rapier3d"]["features"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            features
+                .iter()
+                .map(toml::Value::as_str)
+                .collect::<Option<Vec<_>>>(),
+            Some(vec!["dim3", "f32", "std", "simd-stable", "parallel"])
+        );
+        assert!(
+            manifest["dependencies"]["rapier3d"]
+                .get("optional")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_native_library_dependency_role() {
+        let library_deps = deps(
+            "[dependencies]\nrapier3d = { version = '=0.32.0', library = true, features = ['dim3'] }",
+        );
+        assert!(library_deps[0].library);
+        let ordinary = deps("[dependencies]\naddon = '=1.0.0'");
+        assert!(!ordinary[0].library);
     }
 
     #[test]

@@ -239,10 +239,17 @@ pub(super) fn compile(
             )
         })
         .collect();
+    // Only a dependency explicitly marked `library = true` is a library input,
+    // not another Horizon hook owner. Cargo features are forwarded on the
+    // parent->library edge, while the library itself compiles as ordinary Rust
+    // without the generated hook entry or SDK extern injection. Ordinary dependent
+    // mods remain hook owners.
+    let library_packages = declared_library_packages(&packages, declared);
     for (position, &index) in resolution.order.iter().enumerate() {
         let project = &projects[index];
         let bundle = project.bundle;
         let id = &bundle.manifest.id;
+        let is_library = library_packages.contains(project.package.as_str());
         // Validate the whole local manifest closure without copying or executing its code.
         let inert = out.join("validation").join(id);
         super::registry_generate::stage(bundle, &inert)?;
@@ -278,7 +285,17 @@ pub(super) fn compile(
                     }
                 }
             }
-            if local.as_os_str().is_empty() {
+            if local.as_os_str().is_empty() && is_library {
+                let lib = manifest
+                    .entry("lib")
+                    .or_insert_with(|| toml::Table::new().into())
+                    .as_table_mut()
+                    .ok_or(tr("Invalid lib table"))?;
+                lib.insert(
+                    "crate-type".into(),
+                    vec![toml::Value::String("rlib".into())].into(),
+                );
+            } else if local.as_os_str().is_empty() {
                 let targets: Vec<_> = declared[index]
                     .iter()
                     .map(|dependency| dependencies::Package {
@@ -338,25 +355,29 @@ pub(super) fn compile(
             }
             fs::write(path, manifest.to_string()).map_err(|e| e.to_string())?;
         }
-        let mut externs: BTreeMap<String, PathBuf> = BTreeMap::from([
-            ("mod_api".into(), prebuilt::library(&deps, "mod_api")?),
-            ("mod_vocab".into(), prebuilt::library(&deps, "mod_vocab")?),
-        ]);
-        for (name, path) in &externs {
-            prebuilt::refuse_closure_rlib(id, name, path)?;
-        }
-        for (name, package) in project.api_dependencies() {
-            if package != "internals" {
-                let path = prebuilt::library(&deps, package)?;
-                prebuilt::refuse_closure_rlib(id, package, &path)?;
-                externs.insert(name, path);
+        let mut externs: BTreeMap<String, PathBuf> = BTreeMap::new();
+        if !is_library {
+            externs = BTreeMap::from([
+                ("mod_api".into(), prebuilt::library(&deps, "mod_api")?),
+                ("mod_vocab".into(), prebuilt::library(&deps, "mod_vocab")?),
+            ]);
+            for (name, path) in &externs {
+                prebuilt::refuse_closure_rlib(id, name, path)?;
+            }
+            for (name, package) in project.api_dependencies() {
+                if package != "internals" {
+                    let path = prebuilt::library(&deps, package)?;
+                    prebuilt::refuse_closure_rlib(id, package, &path)?;
+                    externs.insert(name, path);
+                }
             }
         }
-        if internals::needed(&bundle.manifest)
-            || project
-                .api_dependencies()
-                .iter()
-                .any(|(_, package)| *package == "internals")
+        if !is_library
+            && (internals::needed(&bundle.manifest)
+                || project
+                    .api_dependencies()
+                    .iter()
+                    .any(|(_, package)| *package == "internals"))
         {
             let facade = &generated[id.as_str()];
             let facade_relative = internals::relative(id);
@@ -546,8 +567,8 @@ pub(super) fn compile(
             game_names.remove(name);
         }
     }
-    super::crates::check_game_graph_names(out, &lock, &game_names)?;
-    let inventory = metadata.inventory(&super::registry_lock::RegistryLock::default(), links)?;
+    super::crates::check_game_graph_names(out, &super::read_lock(out)?, &game_names)?;
+    let inventory = metadata.inventory(&plan.game, links)?;
     if inventory.added_crates > 0 && !options.consent.is_some_and(|ask| ask(&inventory)) {
         return Err(crate::i18n::tr("Registry dependency compilation was not approved").into());
     }
@@ -648,6 +669,9 @@ pub(super) fn compile(
     let mut runtime = prebuilt::runtime_libraries(rust, &sdk, game)?;
     for &index in &resolution.order {
         let project = &projects[index];
+        if library_packages.contains(project.package.as_str()) {
+            continue;
+        }
         let library = release.join(prebuilt::dylib_name(&project.crate_name()));
         super::library_record::validate_exports(&library, &project.bundle.manifest.id)?;
         super::library_record::stamp(
@@ -689,6 +713,19 @@ pub(super) fn compile(
     Ok((binary, runtime))
 }
 
+fn declared_library_packages<'a>(
+    packages: &BTreeMap<&'a str, &'a str>,
+    declared: &[Vec<dependencies::Dependency>],
+) -> std::collections::BTreeSet<&'a str> {
+    declared
+        .iter()
+        .flat_map(|dependencies| dependencies.iter())
+        .filter(|dependency| dependency.library)
+        .map(|dependency| dependency.id.as_str())
+        .filter_map(|id| packages.get(id).copied())
+        .collect()
+}
+
 /// Gives each file under `staged` whose bytes equal the file at the same place under `previous`
 /// that file's modified time.
 fn keep_unchanged_times(staged: &Path, previous: &Path) -> std::io::Result<()> {
@@ -720,6 +757,30 @@ fn keep_unchanged_times(staged: &Path, previous: &Path) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_resolved_declared_dependencies_become_library_packages() {
+        let packages = BTreeMap::from([
+            ("sable", "horizon_sable"),
+            ("rapier3d", "rapier3d"),
+            ("unrelated", "unrelated"),
+        ]);
+        let declared = vec![vec![dependencies::Dependency {
+            id: "rapier3d".into(),
+            requirement: semver::VersionReq::STAR,
+            optional: false,
+            library: true,
+            features: vec!["dim3".into(), "parallel".into()],
+            side: horizon_platform::mod_package::manifest::Side::Both,
+            reason: None,
+            url: None,
+            order: mod_vocab::DependencyOrder::After,
+        }]];
+        let libraries = declared_library_packages(&packages, &declared);
+        assert!(libraries.contains("rapier3d"));
+        assert!(!libraries.contains("horizon_sable"));
+        assert!(!libraries.contains("unrelated"));
+    }
+
     /// A restaged file whose bytes didn't change keeps its old modified time, so cargo reuses
     /// what it built from it; a changed or new file keeps its new one.
     #[test]

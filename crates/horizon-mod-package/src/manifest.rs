@@ -145,6 +145,13 @@ pub struct DependencyDetails {
     pub version: semver::VersionReq,
     #[serde(default)]
     pub optional: bool,
+    /// The dependency is a native sibling library, not a Horizon hook owner.
+    /// This only affects native staging; it does not alter dependency ordering.
+    #[serde(default)]
+    pub library: bool,
+    /// Cargo features to enable when this dependency is staged as a native package.
+    #[serde(default)]
+    pub features: Vec<String>,
     /// The installation on which this dependency declaration applies.
     #[serde(default = "both_sides")]
     pub side: Side,
@@ -166,6 +173,8 @@ impl Dependency {
             Self::Version(version) => DependencyDetails {
                 version: version.clone(),
                 optional: false,
+                library: false,
+                features: Vec::new(),
                 side: Side::Both,
                 reason: None,
                 url: None,
@@ -1684,6 +1693,14 @@ capabilities = ["registries"]
         assert!(matches!(
             &manifest.dependencies["create"],
             Dependency::Version(_)
+        ));
+        let with_features = Manifest::parse(&format!(
+            "{EXAMPLE}[dependencies]\nrapier3d = {{ version = '=0.32.0', features = ['dim3', 'parallel'] }}\n"
+        ))
+        .unwrap();
+        assert!(matches!(
+            &with_features.dependencies["rapier3d"],
+            Dependency::Detailed(details) if details.features == ["dim3", "parallel"]
         ));
         for bad in [
             text.replace("^6.0", "not semver"),

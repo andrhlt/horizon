@@ -100,6 +100,43 @@ pub(super) fn copy(bundle: &Bundle, to: &Path) -> Result<(), String> {
     copy_files(to, checked_files(bundle)?)
 }
 
+/// Install a runtime-compatible copy of a native package. Dependency features and the native
+/// library role are consumed by the launcher while building, but older pinned game runtimes have
+/// a strict manifest schema and do not understand those build-only fields.
+pub(super) fn copy_runtime(bundle: &Bundle, to: &Path) -> Result<(), String> {
+    let mut files = checked_files(bundle)?;
+    let manifest_bytes = files
+        .get_mut(manifest::MANIFEST)
+        .ok_or("native package has no manifest")?;
+    let manifest_text = std::str::from_utf8(manifest_bytes).map_err(|e| e.to_string())?;
+    let mut manifest: toml::Table = manifest_text
+        .parse()
+        .map_err(|e| format!("{}: {e}", manifest::MANIFEST))?;
+    if let Some(dependencies) = manifest
+        .get_mut("dependencies")
+        .and_then(toml::Value::as_table_mut)
+    {
+        dependencies.retain(|_, dependency| {
+            if let Some(details) = dependency.as_table_mut() {
+                if details
+                    .get("library")
+                    .and_then(toml::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return false;
+                }
+                details.remove("features");
+                details.remove("library");
+            }
+            true
+        });
+    }
+    *manifest_bytes = toml::to_string(&manifest)
+        .map_err(|e| e.to_string())?
+        .into_bytes();
+    copy_files(to, files)
+}
+
 /// Only code enters the tool; runtime resource packs stay with the package.
 pub(super) fn copy_tool_input(bundle: &Bundle, to: &Path) -> Result<(), String> {
     copy_files(
@@ -280,5 +317,35 @@ mod state_tests {
         assert!(error.contains("E_MIXIN_STATE_LAYOUT"), "{error}");
         assert!(error.contains("attachment"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod runtime_manifest_tests {
+    #[test]
+    fn runtime_copy_removes_only_launcher_build_dependency_fields() {
+        let home = super::super::tests::dir("runtime-manifest");
+        super::super::tests::write_bundle(&home, "sable", "");
+        let source = home.join(horizon_platform::mod_package::manifest::MANIFEST);
+        let mut original = std::fs::read_to_string(&source).unwrap();
+        original.push_str(
+            "\n[dependencies.rapier3d]\nversion = '=0.32.0'\nlibrary = true\nfeatures = ['dim3', 'f32', 'std', 'simd-stable', 'parallel']\n",
+        );
+        std::fs::write(&source, &original).unwrap();
+        let bundle = super::read(&home).unwrap().unwrap();
+        let runtime = home.join("runtime-copy");
+        super::copy_runtime(&bundle, &runtime).unwrap();
+
+        let runtime_path = runtime.join(horizon_platform::mod_package::manifest::MANIFEST);
+        let text = std::fs::read_to_string(runtime_path).unwrap();
+        let manifest: toml::Table = text.parse().unwrap();
+        assert!(!manifest["dependencies"]
+            .as_table()
+            .unwrap()
+            .contains_key("rapier3d"));
+        assert!(std::fs::read_to_string(source)
+            .unwrap()
+            .contains("library = true"));
+        horizon_platform::mod_package::Package::read(&runtime).unwrap();
     }
 }

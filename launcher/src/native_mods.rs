@@ -53,7 +53,7 @@ pub(crate) static TEST_STATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const PREFIX: &str = "native-";
 // A staging change invalidates both installed builds and patched-source snapshots.
-const STAGING: &str = "area-aware-mixins-input-v1";
+const STAGING: &str = "area-aware-mixins-input-v3-runtime-library";
 /// horizon-mixins, for bundles that don't name the revision they were tested with.
 const MIXINS_GIT: &str = "https://github.com/horizon-rust/horizon-mixins";
 pub const MIXINS_REV: &str = horizon_platform::mod_package::mixins_tool::REV;
